@@ -300,18 +300,21 @@ class InternalEnvironment(object):
         logging.warning("destroying environment at {:#x}.".format(ctypes.addressof(environment.contents)))
         libwstp.WSDeinitialize(environment)
 
+    ### each of the following dicts are used for releasing objects associated with an environment
+
+    ## WSLink
     _links = {}
     @classmethod
-    def finish(cls, environment, links):
+    def attach_links(cls, environment, links):
         address = id(links)
         assert(address not in cls._links)
-        cls._links[address] = weakref.finalize(environment, cls.__finish, ctypes.cast(environment, libwstp.WSEnvironment), links)
+        cls._links[address] = weakref.finalize(environment, cls.__finish_links, ctypes.cast(environment, libwstp.WSEnvironment), links)
 
     @classmethod
-    def __finish(cls, environment, links):
+    def __finish_links(cls, environment, links):
         ok, destroyed = True, {}
         for identifier, link in links.items():
-            result = destroyed[identifier] = cls.unlink(environment, identifier)
+            result = destroyed[identifier] = cls.destroy_link(environment, identifier)
             ok = result and ok
 
         if not ok:
@@ -323,7 +326,7 @@ class InternalEnvironment(object):
         return ok
 
     @classmethod
-    def unlink(cls, environment, identifier):
+    def destroy_link(cls, environment, identifier):
         wslink = libwstp.WSFromLinkID(environment, identifier)
         if not wslink:
             logging.warning("unable to close link {:#x}.".format(identifier))
@@ -334,15 +337,257 @@ class InternalEnvironment(object):
         logging.warning("closed link {:#x} with name \"{:s}\".".format(identifier, name.decode('ascii')))
         return True
 
+    ## WSLinkServer
+    _servers = {}
+    @classmethod
+    def attach_servers(cls, environment, servers):
+        address = id(servers)
+        assert(address not in cls._servers)
+        cls._servers[address] = weakref.finalize(environment, cls.__finish_servers, ctypes.cast(environment, libwstp.WSEnvironment), servers)
+
+    @classmethod
+    def __finish_servers(cls, environment, servers):
+        ok, destroyed = True, {}
+        for identifier, server in servers.items():
+            result = destroyed[identifier] = cls.destroy_server(environment, server)
+            ok = result and ok
+
+        if not ok:
+            items = {identifier for identifier, result in destroyed.items() if not result}
+            assert(items)
+            logging.fatal("unable to destroy server{:s} {:s}.".format('' if len(items) == 1 else 's', ', '.join(itertools.chain(map("{:#x}".format, items[:-1]), ["and {:#x}".format(*items[-1:])])) if len(items) > 1 else "{:#x}".format(*items)))
+            logging.warning("ignoring previous {:d} error{:s} and deinitializing the environment anyways...".format(len(items), '' if len(items) == 1 else 's'))
+
+        return ok
+
+    @classmethod
+    def destroy_server(cls, server):
+        libwstp.WSShutdownLinkServer(server)
+        logging.warning("shutdown server {!r}.".format(server))
+        return True
+
+    ## WSLinkServiceBrowser
+    _browsers = {}
+    @classmethod
+    def attach_browsers(cls, environment, browsers):
+        address = id(browsers)
+        assert(address not in cls._browsers)
+        cls._browsers[address] = weakref.finalize(environment, cls.__finish_browsers, ctypes.cast(environment, libwstp.WSEnvironment), browsers)
+
+    @classmethod
+    def __finish_browsers(cls, environment, browsers):
+        ok, destroyed = True, {}
+        for address, serviceRef in browsers.items():
+            result = destroyed[address] = cls.destroy_browser(environment, serviceRef)
+            ok = result and ok
+
+        if not ok:
+            items = {identifier for identifier, result in destroyed.items() if not result}
+            assert(items)
+            logging.fatal("unable to destroy browser{:s} {:s}.".format('' if len(items) == 1 else 's', ', '.join(itertools.chain(map("{:#x}".format, items[:-1]), ["and {:#x}".format(*items[-1:])])) if len(items) > 1 else "{:#x}".format(*items)))
+            logging.warning("ignoring previous {:d} error{:s} and deinitializing the environment anyways...".format(len(items), '' if len(items) == 1 else 's'))
+
+        return ok
+
+    @classmethod
+    def destroy_browser(cls, environment, serviceRef):
+        libwstp.WSStopBrowsingForLinkServices(environment, serviceRef)
+        logging.warning("stopped browser {!r}.".format(serviceRef))
+        return True
+
+    ## WSLinkServiceResolver
+    _resolvers = {}
+    @classmethod
+    def attach_resolvers(cls, environment, resolvers):
+        address = id(resolvers)
+        assert(address not in cls._resolvers)
+        cls._resolvers[address] = weakref.finalize(environment, cls.__finish_resolvers, ctypes.cast(environment, libwstp.WSEnvironment), resolvers)
+
+    @classmethod
+    def __finish_resolvers(cls, environment, resolvers):
+        ok, destroyed = True, {}
+        for address, serviceRef in resolvers.items():
+            result = destroyed[address] = cls.destroy_resolver(environment, serviceRef)
+            ok = result and ok
+
+        if not ok:
+            items = {address for address, result in destroyed.items() if not result}
+            assert(items)
+            logging.fatal("unable to destroy resolver{:s} {:s}.".format('' if len(items) == 1 else 's', ', '.join(itertools.chain(map("{:#x}".format, items[:-1]), ["and {:#x}".format(*items[-1:])])) if len(items) > 1 else "{:#x}".format(*items)))
+            logging.warning("ignoring previous {:d} error{:s} and deinitializing the environment anyways...".format(len(items), '' if len(items) == 1 else 's'))
+
+        return ok
+
+    @classmethod
+    def destroy_resolver(cls, environment, serviceRef):
+        libwstp.WSStopResolvingLinkService(environment, serviceRef)
+        logging.warning("stopped resolver {!r}.".format(serviceRef))
+        return True
+
+    ## WSLinkService
+    _services = {}
+    @classmethod
+    def attach_services(cls, environment, services):
+        address = id(services)
+        assert(address not in cls._services)
+        cls._services[address] = weakref.finalize(environment, cls.__finish_services, ctypes.cast(environment, libwstp.WSEnvironment), services)
+
+    @classmethod
+    def __finish_services(cls, environment, services):
+        ok, destroyed = True, {}
+        for address, serviceRef in services.items():
+            result = destroyed[address] = cls.destroy_service(environment, serviceRef)
+            ok = result and ok
+
+        if not ok:
+            items = {address for address, result in destroyed.items() if not result}
+            assert(items)
+            logging.fatal("unable to destroy service{:s} {:s}.".format('' if len(items) == 1 else 's', ', '.join(itertools.chain(map("{:#x}".format, items[:-1]), ["and {:#x}".format(*items[-1:])])) if len(items) > 1 else "{:#x}".format(*items)))
+            logging.warning("ignoring previous {:d} error{:s} and deinitializing the environment anyways...".format(len(items), '' if len(items) == 1 else 's'))
+
+        return ok
+
+    @classmethod
+    def destroy_service(cls, environment, serviceRef):
+        libwstp.WSStopRegisteringLinkService(environment, serviceRef)
+        logging.warning("stopped service {!r}.".format(serviceRef))
+        return True
+
 class Environment(object):
     def __init__(self, environment):
-        self.__environment = environment
-        self._links, self._finalizers = weakref.WeakValueDictionary(), {}
-        InternalEnvironment.finish(environment, self._links)
+        self._environment, self._finalizers, self._contextrefs = environment, {}, {}
+
+        self._links, self._servers = (weakref.WeakValueDictionary() for count in range(2))
+        InternalEnvironment.attach_links(environment, self._links)
+        InternalEnvironment.attach_servers(environment, self._servers)
+
+        self._browsers, self._resolvers, self._services = (weakref.WeakValueDictionary() for count in range(3))
+        InternalEnvironment.attach_browsers(environment, self._browsers)
+        InternalEnvironment.attach_resolvers(environment, self._resolvers)
+        InternalEnvironment.attach_services(environment, self._services)
+
+    ### settings
+    def set_environment_id(self, environment_id):
+        '''MLSetEnvIDString'''
+        env, environment_id = self._environment, ctypes.c_char_p(environment_id)
+        err = libwstp.WSSetEnvIDString(env, environment_id)
+        if err != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, err)
+        return
 
     @property
-    def protocols(self):
-        env, protocolnames, length = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSGetAvailableLinkProtocolNames, -2)))
+    def environment_data(self):
+        '''MLEnvironmentData'''
+        res, target = libwstp.WSEnvironmentData(self._environment), ctypes.POINTER(ctypes.py_object)
+        return ctypes.cast(res, target).contents.value if res else None
+    @environment_data.setter
+    def environment_data(self, value):
+        '''MLSetEnvironmentData'''
+        self.__environment_data = object = ctypes.py_object(value)  # persist a reference
+        err = libwstp.WSSetEnvironmentData(self._environment, ctypes.pointer(object))
+        if err != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, err)
+        return
+
+    # random properties that depend on the WSEnvironment type.
+    def version(self):
+        env, inumb, rnumb, bnumb = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSVersionNumbers, -3)))
+        libwstp.WSVersionNumbers(self._environment, ctypes.byref(inumb), ctypes.byref(rnumb), ctypes.byref(bnumb))
+        return inumb, rnumb, bnumb
+
+    def compiler_id(self):
+        env, id = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSCompilerID, -1)))
+        err = libwstp.WSCompilerID(env, ctypes.byref(id))
+        if err != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, err)
+
+        with utils.pstring(id, functools.partial(libwstp.WSReleaseCompilerID, self._environment)) as id:
+            result = id
+        return result
+
+    def ucs2_compiler_id(self):
+        env, id, length = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSUCS2CompilerID, -2)))
+        err = libwstp.WSUCS2CompilerID(env, ctypes.byref(id), ctypes.byref(length))
+        if err != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, err)
+
+        with utils.puint16s(id, length, functools.partial(libwstp.WSReleaseUCS2CompilerID, self._environment), length) as id:
+            result = id
+        return result
+
+    def utf8_compiler_id(self):
+        env, id, length = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSUTF8CompilerID, -2)))
+        err = libwstp.WSUTF8CompilerID(env, ctypes.byref(id), ctypes.byref(length))
+        if err != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, err)
+
+        # FIXME:
+        with utils.pstring(id, length, functools.partial(libwstp.WSReleaseUTF8CompilerID, self._environment), length) as id:
+            result = id
+        return result
+
+    def utf16_compiler_id(self):
+        env, id, length = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSUTF16CompilerID, -2)))
+        err = libwstp.WSUTF16CompilerID(env, ctypes.byref(id), ctypes.byref(length))
+        if err != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, err)
+
+        with utils.puint16s(id, length, functools.partial(libwstp.WSReleaseUTF16CompilerID, self._environment), length) as id:
+            result = id
+        return result
+
+    def utf32_compiler_id(self):
+        env, id, length = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSUTF32CompilerID, -2)))
+        err = libwstp.WSUTF32CompilerID(env, ctypes.byref(id), ctypes.byref(length))
+        if err != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, err)
+
+        with utils.puint32s(id, length, functools.partial(libwstp.WSReleaseUTF32CompilerID, self._environment), length) as id:
+            result = id
+        return result
+
+    ### signal handling
+    def set_signal_handler(signum, sigaction):
+        '''MLSetSignalHandler'''
+        err = libwstp.WSSetSignalHandler(self._environment, signum, sigaction)
+        if err != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, err)
+        return
+
+    def set_signal_handler_function(signum, sigfunc):
+        '''MLSetSignalHandlerFromFunction'''
+        err = libwstp.WSSetSignalHandlerFromFunction(self._environment, signum, sigfunc)
+        if err != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, err)
+        return
+
+    def unset_signal_handler_function(signum, sigfunc):
+        '''MLUnsetSignalHandler'''
+        err = libwstp.WSUnsetSignalHandler(self._environment, signum, sigfunc)
+        if err != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, err)
+        return
+
+    ### network interface api
+    def get_address_list(self):
+        '''MLGetNetworkAddressList/MLReleaseNetworkAddressList'''
+        env, size = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSGetNetworkAddressList, -1)))
+        addresses = libwstp.WSGetNetworkAddressList(env, ctypes.byref(size))
+        with utils.pstrings(addresses, size, functools.partial(libwstp.WSReleaseNetworkAddressList, env), size) as addresses:
+            result = addresses
+        return result
+
+    def get_domain_list(self):
+        '''MLGetDomainNameList/MLReleaseDomainNameList'''
+        env, size = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSGetDomainNameList, -1)))
+        dnsnames = libwstp.WSGetDomainNameList(env, ctypes.byref(size))
+        with utils.pstrings(dnsnames, size) as dnsnames:
+            result = dnsnames
+        return result
+
+    @property
+    def available_link_protocol_names(self):
+        env, protocolnames, length = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSGetAvailableLinkProtocolNames, -2)))
         err = libwstp.WSGetAvailableLinkProtocolNames(env, ctypes.byref(protocolnames), ctypes.byref(length))
         if err != libwstp.WSEOK:
             raise WSTPEnvironmentErrorMessage(env, err, 'unable to get available link protocol names')
@@ -350,7 +595,7 @@ class Environment(object):
             decoded = [item.decode('ascii') for item in items]
         return {string for string in decoded}
 
-    def _available_link_protocols(self):
+    def _available_link_protocol_names(self):
         available, candidates  = self.protocols, {ch for ch in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'}
         original = {proto : proto for proto in available}
         mixed, lower = {}, {proto.lower() : proto for proto in available if proto.upper() == proto}
@@ -367,10 +612,36 @@ class Environment(object):
         [result.update(items) for items in [original, lower, mixed]]
         return result
 
+    ## WSLink
+    def Connect(self, protocol, name=None):
+        return self.__create_link(name, protocol, 'connect')
+    def Create(self, protocol, name=None):
+        return self.__create_link(name, protocol, 'create')
+    def Launch(self, protocol, name=None):
+        return self.__create_link(name, protocol, 'launch')
+    def Close(self, wslink):
+        env, identifier = self._environment, wslink if isinstance(wslink, int) else libwstp.WSToLinkID(wslink)
+        link = self._links.pop(identifier, libwstp.WSFromLinkID(env, identifier))
+        assert(isinstance(link, libwstp.WSLINK))
+        return InternalEnvironment.destroy_link(env, identifier)
+
+    def get_links(self):
+        '''MLGetLinksFromEnvironment/MLReleaseLinksFromEnvironment'''
+        # FIXME: probably not useful
+        env, links, length = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSGetLinksFromEnvironment, -2)))
+        err = libwstp.WSGetLinksFromEnvironment(env, ctypes.byref(links), ctypes.byref(length))
+        if err != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, err)
+
+        # FIXME: each of these should be WSLink objects.
+        with utils.ptargets(libwstp.MLINK, links, length, functools.partial(libwstp.WSReleaseLinksFromEnvironment, env)) as links:
+            result = links
+        return result
+
     def __create_link(self, name, protocol, type):
         parameters.setdefault('-name', name) if name else None
 
-        available = self._link_protocols()
+        available = self._available_link_protocol_names()
         assert(available.get(protocol, available.get(protocol.casefold())) is not None)
         selected = available[protocol] if protocol in available else available[protocol.casefold()]
         parameters = {'-linkprotocol': selected}
@@ -379,7 +650,7 @@ class Environment(object):
         iterable = itertools.chain(["-link{:s}".format(type.lower())], *[(key, value) for key, value in parameters.items()])
         argv = [arg for arg in iterable]
 
-        env, error = self.__environment, utils.argument(libwstp.WSOpenString, -1)(libwstp.WSEUNKNOWN)
+        env, error = self._environment, utils.argument(libwstp.WSOpenString, -1)(libwstp.WSEUNKNOWN)
         link = libwstp.WSOpenString(env, ' '.join(argv), ctypes.byref(error))
         if not(link) or error.value != libwstp.WSEOK:
             raise WSTPEnvironmentErrorMessage(env, error.value, "unable to {:s} link{:s} with protocol {:s} ({message})", type.lower(), " \"{:s}\"".format(name) if name else '', parameters['-linkprotocol'])
@@ -387,7 +658,7 @@ class Environment(object):
         identifier = libwstp.WSToLinkID(link)
         sanity = self._finalizers.get(identifier, None)
         assert((sanity is None) or not(sanity.alive))
-        self._finalizers[identifier] = weakref.finalize(link, InternalEnvironment.unlink, env, identifier)
+        self._finalizers[identifier] = weakref.finalize(link, InternalEnvironment.destroy_link, env, identifier)
         self._links[identifier] = link
         index = len(self._links)
 
@@ -395,296 +666,322 @@ class Environment(object):
         logging.warning("created link #{:d} ({:#x}) with name \"{:s}\" and returning it as {!s}.".format(index, identifier, description.decode('ascii'), link))
         return link
 
-    def connect(self, protocol, name=None):
-        return self.__create_link(name, protocol, 'connect')
-    def create(self, protocol, name=None):
-        return self.__create_link(name, protocol, 'create')
-    def launch(self, protocol, name=None):
-        return self.__create_link(name, protocol, 'launch')
-
-    def unlink(self, wslink):
-        env, identifier = self.__environment, wslink if isinstance(wslink, int) else libwstp.WSToLinkID(wslink)
-        link = self._links.pop(identifier, libwstp.WSFromLinkID(env, identifier))
-        assert(isinstance(link, libwstp.WSLINK))
-        return InternalEnvironment.unlink(env, identifier)
-
-    ## settings
-    def set_environment_id(self, environment_id):
-        '''MLSetEnvIDString'''
-        env, environment_id = self.__environment, ctypes.c_char_p(environment_id)
-        err = libwstp.WSSetEnvIDString(env, environment_id)
-        if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
-        return
-
-    @property
-    def environment_data(self):
-        '''MLEnvironmentData'''
-        res, target = libwstp.WSEnvironmentData(self.__environment), ctypes.POINTER(ctypes.py_object)
-        return ctypes.cast(res, target).contents.value if res else None
-    @environment_data.setter
-    def environment_data(self, value):
-        '''MLSetEnvironmentData'''
-        self.__environment_data = object = ctypes.py_object(value)  # persist a reference
-        err = libwstp.WSSetEnvironmentData(self.__environment, ctypes.pointer(object))
-        if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
-        return
-
-    def set_signal_handler(signum, sigaction):
-        '''MLSetSignalHandler'''
-        err = libwstp.WSSetSignalHandler(self.__environment, signum, sigaction)
-        if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
-        return
-
-    def set_signal_handler_function(signum, sigfunc):
-        '''MLSetSignalHandlerFromFunction'''
-        err = libwstp.WSSetSignalHandlerFromFunction(self.__environment, signum, sigfunc)
-        if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
-        return
-
-    def unset_signal_handler_function(signum, sigfunc):
-        '''MLUnsetSignalHandler'''
-        err = libwstp.WSUnsetSignalHandler(self.__environment, signum, sigfunc)
-        if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
-        return
-
-    ## methods for managling WSLink objects.
-    def get_links(self):
-        '''MLGetLinksFromEnvironment/MLReleaseLinksFromEnvironment'''
-        env, links, length = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSGetLinksFromEnvironment, -2)))
-        err = libwstp.WSGetLinksFromEnvironment(env, ctypes.byref(links), ctypes.byref(length))
-        if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
-
-        with utils.ptargets(libwstp.MLINK, links, length, functools.partial(libwstp.WSReleaseLinksFromEnvironment, env)) as links:
-            result = links
-        return result
-
-    def fetch(self, wslink):
+    # interacts with links that are cached.
+    def get_link(self, wslink):
         identifier = wslink if isinstance(wslink, int) else libwstp.WSToLinkID(wslink)
         if identifier not in self._links:
             raise KeyError("unable to find link by its identifier {:s}.".format("{:#x}".format(identifier) if isinstance(wslink, int) else "{:#x} ({!s})".format(identifier, wslink)))
         return self._links[identifier]
 
-    def exists(self, wslink):
+    def exists_link(self, wslink):
         identifier = wslink if isinstance(wslink, int) else libwstp.WSToLinkID(wslink)
         return identifier in self._links
 
-    def available(self):
+    def available_links(self):
         return {identifier for identifier in self._links}
 
-    ### network interface api
-    def get_address_list(self):
-        '''MLGetNetworkAddressList/MLReleaseNetworkAddressList'''
-        env, size = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSGetNetworkAddressList, -1)))
-        addresses = libwstp.WSGetNetworkAddressList(env, ctypes.byref(size))
-        with utils.pstrings(addresses, size, functools.partial(libwstp.WSReleaseNetworkAddressList, env), size) as addresses:
-            result = addresses
-        return result
+    ### service discovery and advertisement
 
-    def get_domain_list(self):
-        '''MLGetDomainNameList/MLReleaseDomainNameList'''
-        env, size = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSGetDomainNameList, -1)))
-        dnsnames = libwstp.WSGetDomainNameList(env, ctypes.byref(size))
-        with utils.pstrings(dnsnames, size) as dnsnames:
-            result = dnsnames
-        return result
-
-    ### random properties that depend on the WSEnvironment type.
-    def version(self):
-        env, inumb, rnumb, bnumb = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSVersionNumbers, -3)))
-        libwstp.WSVersionNumbers(self.__environment, ctypes.byref(inumb), ctypes.byref(rnumb), ctypes.byref(bnumb))
-        return inumb, rnumb, bnumb
-
-    def compiler_id(self):
-        env, id = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSCompilerID, -1)))
-        err = libwstp.WSCompilerID(env, ctypes.byref(id))
-        if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
-
-        with utils.pstring(id, functools.partial(libwstp.WSReleaseCompilerID, self.__environment)) as id:
-            result = id
-        return result
-
-    def ucs2_compiler_id(self):
-        env, id, length = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSUCS2CompilerID, -2)))
-        err = libwstp.WSUCS2CompilerID(env, ctypes.byref(id), ctypes.byref(length))
-        if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
-
-        with utils.puint16s(id, length, functools.partial(libwstp.WSReleaseUCS2CompilerID, self.__environment), length) as id:
-            result = id
-        return result
-
-    def utf8_compiler_id(self):
-        env, id, length = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSUTF8CompilerID, -2)))
-        err = libwstp.WSUTF8CompilerID(env, ctypes.byref(id), ctypes.byref(length))
-        if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
-
-        # FIXME:
-        with utils.pstring(id, length, functools.partial(libwstp.WSReleaseUTF8CompilerID, self.__environment), length) as id:
-            result = id
-        return result
-
-    def utf16_compiler_id(self):
-        env, id, length = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSUTF16CompilerID, -2)))
-        err = libwstp.WSUTF16CompilerID(env, ctypes.byref(id), ctypes.byref(length))
-        if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
-
-        with utils.puint16s(id, length, functools.partial(libwstp.WSReleaseUTF16CompilerID, self.__environment), length) as id:
-            result = id
-        return result
-
-    def utf32_compiler_id(self):
-        env, id, length = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSUTF32CompilerID, -2)))
-        err = libwstp.WSUTF32CompilerID(env, ctypes.byref(id), ctypes.byref(length))
-        if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
-
-        with utils.puint32s(id, length, functools.partial(libwstp.WSReleaseUTF32CompilerID, self.__environment), length) as id:
-            result = id
-        return result
-
-    ## service discovery and advertisement
-    def browse_for_link_services(self, callbackFunction, serviceProtocol, domain, context):
+    ## WSLinkServiceBrowserref/c/WSStopRegisteringLinkService
+    def browse_for_link_services(self, callbackFunction, serviceProtocol, domain, context=None):
         '''MLBrowseForLinkServices'''
-        env, ref = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSBrowseForLinkServices, -1)))
-        err = libwstp.WSBrowseForLinkServices(env, callbackFunction, ctypes.c_char_p(serviceProtocol), ctypes.c_char_p(domain), context, ctypes.byref(ref))
-        if error.value != libwstp.WSEOK:
+        env, ref = (item() for item in itertools.chain([lambda:self._ref/c/WSStopRegisteringLinkService_environment], utils.arguments(libwstp.WSBrowseForLinkServices, -1)))
+        context = None if context is None else ctypes.py_object(context)
+        err = libwstp.WSBrowseForLinkServices(env, callbackFunction, ctypes.c_char_p(serviceProtocol), ctypes.c_char_p(domain), context if context is None else ctypes.pointer(context), ctypes.byref(ref))
+        if error.value != libwstp.WSEOK or not res:
             raise WSTPEnvironmentError(env, error.value)
-        return ref
-    def stop_browsing_for_link_services(self, ref):
-        '''MLStopBrowsingForLinkServices'''
-        libwstp.WSStopBrowsingForLinkServices(self.__environment, ref)
-        return True
-    def resolve_link_service(self, callbackFunction, serviceProtocol, serviceName, context, ref):
+        return self.__create_browser(ref, context)
+
+    def __create_browser(self, ref, context):
+        assert(operator.eq(*map(ctypes.sizeof, [ref, ctypes.c_long])))
+        address, ctx = ctypes.cast(ref, ctypes.c_long).value, None if context is None else ctypes.cast(context, ctypes.c_long).value
+
+        sanity = self._finalizers.get(address, None)
+        assert((sanity is None) or not(sanity.alive))
+        self._finalizers[address] = weakref.finalize(ref, InternalEnvironment.destroy_browser, utils.clone(ref))
+        self._browsers[address] = ref
+
+        if all(item is not None for item in [context, ctx]):
+            self._contextrefs[address] = context
+            self._finalizers[ctx] = weakref.finalize(ref, self._contextrefs.pop, address, None)
+
+        index = len(self._browsers)
+        logging.warning("created browser #{:d} ({:#x}){:s} and returning it as {!s}.".format(index, address, " with context ({:#x})".format(ctypes.addressof(context.value)) if context else '', browser))
+        return WSLinkServiceBrowser(self._environment, server, context.value)
+
+    # interacts with browsers that are cached
+    def get_browser(self, ref):
+        assert(operator.eq(*map(ctypes.sizeof, [ref, ctypes.c_long])))
+        address = ref if isinstance(ref, int) else ctypes.cast(ref, ctypes.c_long).value
+        if address not in self._browsers:
+            raise KeyError("unable to find browser by its address ({:s}).".format(address))
+        res, context = self._browsers[address], self._contextrefs[address]
+        return WSLinkServiceBrowser(self._environment, res, context)
+
+    def exists_browser(self, ref):
+        assert(operator.eq(*map(ctypes.sizeof, [ref, ctypes.c_long])))
+        address = ref if isinstance(server, int) else ctypes.cast(ref, ctypes.c_long).value
+        return address in self._browsers
+
+    def available_servers(self):
+        return {address for address in self._browsers}
+
+    ## WSLinkServiceResolver
+    def resolve_link_service(self, callbackFunction, serviceProtocol, serviceName, context=None):
         '''MLResolveLinkService'''
-        env, ref = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSResolveLinkService, -1)))
-        err = libwstp.WSResolveLinkService(env, callbackFunction, ctypes.c_char_p(serviceProtocol), ctypes.c_char_p(serviceName), context, ctypes.byref(ref))
+        env, ref = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSResolveLinkService, -1)))
+        context = None if context is None else ctypes.py_object(context)
+        err = libwstp.WSResolveLinkService(env, callbackFunction, ctypes.c_char_p(serviceProtocol), ctypes.c_char_p(serviceName), context if context is None else ctypes.pointer(context), ctypes.byref(ref))
         if error.value != libwstp.WSEOK:
             raise WSTPEnvironmentError(env, err)
-        return ref
-    def stop_resolving_link_service(self, ref):
-        libwstp.WSStopResolvingLinkService(self.__environment, ref)
-        return True
-    def register_link_service_with_port_and_hostname(self, serviceProtocol, serviceName, port, hostname, function, domain, context):
+        return self.__create_resolver(ref, context)
+
+    def __create_resolver(self, ref, context):
+        assert(operator.eq(*map(ctypes.sizeof, [ref, ctypes.c_long])))
+        address, ctx = ctypes.cast(ref, ctypes.c_long).value, None if context is None else ctypes.cast(context, ctypes.c_long).value
+
+        sanity = self._finalizers.get(address, None)
+        assert((sanity is None) or not(sanity.alive))
+        self._finalizers[address] = weakref.finalize(ref, InternalEnvironment.destroy_resolver, utils.clone(ref))
+        self._resolvers[address] = ref
+
+        if all(item is not None for item in [context, ctx]):
+            self._contextrefs[address] = context
+            self._finalizers[ctx] = weakref.finalize(ref, self._contextrefs.pop, address, None)
+
+        index = len(self._resolvers)
+        logging.warning("created resolver #{:d} ({:#x}){:s} and returning it as {!s}.".format(index, address, " with context ({:#x})".format(ctypes.addressof(context.value)) if context else '', resolver))
+        return WSLinkServiceResolver(self._environment, resolver, context.value)
+
+    # interacts with resolvers that are cached
+    def get_resolver(self, ref):
+        assert(operator.eq(*map(ctypes.sizeof, [ref, ctypes.c_long])))
+        address = ref if isinstance(ref, int) else ctypes.cast(ref, ctypes.c_long).value
+        if address not in self._resolvers:
+            raise KeyError("unable to find resolver by its address ({:s}).".format(address))
+        resolver, context = self._resolvers[address], self._contextrefs[address]
+        return WSLinkServiceResolver(self._environment, resolver, context)
+
+    def exists_resolver(self, ref):
+        assert(operator.eq(*map(ctypes.sizeof, [ref, ctypes.c_long])))
+        address = ref if isinstance(server, int) else ctypes.cast(ref, ctypes.c_long).value
+        return address in self._resolvers
+
+    def available_resolvers(self):
+        return {address for address in self._resolvers}
+
+    ## WSLinkServer
+    def link_server(self, context=None):
+        '''MLNewLinkServer'''
+        env, error = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSNewLinkServer, -1)))
+        context = None if context is None else ctypes.py_object(context)
+        server = libwstp.WSNewLinkServer(env, context if context is None else ctypes.pointer(context), ctypes.byref(error))
+        if error.value != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, error.value)
+        return self.__create_server(server, context)
+
+    def new_link_server_with_port(self, port, context=None):
+        '''MLNewLinkServerWithPort'''
+        env, error = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSNewLinkServerWithPort, -1)))
+        context = None if context is None else ctypes.py_object(context)
+        server = libwstp.WSNewLinkServerWithPort(env, port, context if context is None else ctypes.pointer(context), ctypes.byref(error))
+        if error.value != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, error.value)
+        return self.__create_server(server, context)
+
+    def new_link_server_with_port_and_interface(port, iface, context=None):
+        '''MLNewLinkServerWithPortAndInterface'''
+        env, error = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSNewLinkServerWithPortAndInterface, -1)))
+        context = None if context is None else ctypes.py_object(context)
+        server = libwstp.WSNewLinkServerWithPortAndInterface(env, port, iface, context if context is None else ctypes.pointer(context), ctypes.byref(error))
+        if error.value != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, error.value)
+        return self.__create_server(server, context)
+
+    def __create_server(self, server, context):
+        assert(operator.eq(*map(ctypes.sizeof, [server, ctypes.c_long])))
+        address, ctx = ctypes.cast(server, ctypes.c_long).value, None if context is None else ctypes.cast(context, ctypes.c_long).value
+
+        sanity = self._finalizers.get(address, None)
+        assert((sanity is None) or not(sanity.alive))
+        self._finalizers[address] = weakref.finalize(server, InternalEnvironment.destroy_server, utils.clone(server))
+        self._servers[address] = server
+
+        if all(item is not None for item in [context, ctx]):
+            self._contextrefs[address] = context
+            self._finalizers[ctx] = weakref.finalize(server, self._contextrefs.pop, address, None)
+
+        index = len(self._servers)
+        logging.warning("created server #{:d} ({:#x}){:s} and returning it as {!s}.".format(index, address, " with context ({:#x})".format(ctypes.addressof(context.value)) if context else '', server))
+        return WSLinkServer(server, context.value)
+
+    # interacts with servers that are cached
+    def get_server(self, server):
+        assert(operator.eq(*map(ctypes.sizeof, [server, ctypes.c_long])))
+        address = server if isinstance(server, int) else ctypes.cast(server, ctypes.c_long).value
+        if address not in self._servers:
+            raise KeyError("unable to find server by its address ({:s}).".format(address))
+        server, context = self._servers[address], self._contextrefs[address]
+        return WSLinkServer(res, context)
+
+    def exists_server(self, server):
+        assert(operator.eq(*map(ctypes.sizeof, [server, ctypes.c_long])))
+        address = server if isinstance(server, int) else ctypes.cast(server, ctypes.c_long).value
+        return address in self._servers
+
+    def available_servers(self):
+        return {identifier for identifier in self._servers}
+
+    ## WSLinkService
+    def register_link_service_with_port_and_hostname(self, serviceProtocol, serviceName, port, hostname, function, domain, context=None):
         '''MLRegisterLinkServiceWithPortAndHostname'''
-        env, ref, error = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSRegisterLinkServiceWithPortAndHostname, -2)))
-        mlink = libwstp.WSRegisterLinkServiceWithPortAndHostname(env, ctypes.c_char_p(serviceProtocol), ctypes.c_char_p(serviceName), port, ctypes.c_char_p(hostname), function, ctypes.c_char_p(domain), context, ctypes.byref(ref), ctypes.byref(error))
+        env, ref, error = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSRegisterLinkServiceWithPortAndHostname, -2)))
+        context = None if context is None else ctypes.py_object(context)
+        mlink = libwstp.WSRegisterLinkServiceWithPortAndHostname(env, ctypes.c_char_p(serviceProtocol), ctypes.c_char_p(serviceName), port, ctypes.c_char_p(hostname), function, ctypes.c_char_p(domain), context if context is None else ctypes.pointer(context), ctypes.byref(ref), ctypes.byref(error))
         if error.value != libwstp.WSEOK:
             raise WSTPEnvironmentError(env, error.value)
-        return mlink, ref
-    def register_link_service_with_hostname(self, serviceProtocol, serviceName, hostname, function, domain, context):
+        # FIXME
+        return mlink, ref, context
+    def register_link_service_with_hostname(self, serviceProtocol, serviceName, hostname, function, domain, context=None):
         '''MLRegisterLinkServiceWithHostname'''
-        env, ref, error = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSRegisterLinkServiceWithHostname, -2)))
-        mlink = libwstp.WSRegisterLinkServiceWithHostname(env, ctypes.c_char_p(serviceProtocol), ctypes.c_char_p(serviceName), ctypes.c_char_p(hostname), function, ctypes.c_char_p(domain), context, ctypes.byref(ref), ctypes.byref(error))
+        env, ref, error = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSRegisterLinkServiceWithHostname, -2)))
+        context = None if context is None else ctypes.py_object(context)
+        mlink = libwstp.WSRegisterLinkServiceWithHostname(env, ctypes.c_char_p(serviceProtocol), ctypes.c_char_p(serviceName), ctypes.c_char_p(hostname), function, ctypes.c_char_p(domain), context if context is None else ctypes.pointer(context), ctypes.byref(ref), ctypes.byref(error))
         if error.value != libwstp.WSEOK:
             raise WSTPEnvironmentError(env, error.value)
-        return mlink, ref
-    def register_link_service(self, serviceProtocol, serviceName, function, domain, context, ref, error):
+        # FIXME
+        return mlink, ref, context
+    def register_link_service(self, serviceProtocol, serviceName, function, domain, context=None):
         '''MLRegisterLinkService'''
-        env, ref, error = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSRegisterLinkService, -2)))
-        mlink = libwstp.WSRegisterLinkService(env, ctypes.c_char_p(serviceProtocol), ctypes.c_char_p(serviceName), function, ctypes.c_char_p(domain), context, ctypes.byref(ref), ctypes.byref(error))
+        env, ref, error = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSRegisterLinkService, -2)))
+        context = None if context is None else ctypes.py_object(context)
+        mlink = libwstp.WSRegisterLinkService(env, ctypes.c_char_p(serviceProtocol), ctypes.c_char_p(serviceName), function, ctypes.c_char_p(domain), context if context is None else ctypes.pointer(context), ctypes.byref(ref), ctypes.byref(error))
         if error.value != libwstp.WSEOK:
             raise WSTPEnvironmentError(env, error.value)
-        return mlink, ref
+        # FIXME
+        return mlink, ref, context
+
     #def register_link_service_using_link_protocol(self, serviceProtocol, serviceName, port, hostname, protocol, function, domain, context, ref, error):
     #    # MLDECL(MLINK, MLRegisterLinkServiceUsingLinkProtocol, (MLEnvironment env, const char *serviceProtocol, const char *serviceName, unsigned short port, const char *hostname, const char *protocol, MLRegisterCallbackFunction function, const char *domain, void *context, MLServiceRef *ref, int *error));
-    #    env, ref, error = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSRegisterLinkServiceUsi, -2)))
+    #    env, ref, error = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSRegisterLinkServiceUsi, -2)))
     #    mlink = libwstp.WSRegisterLinkService(env, ctypes.c_char_p(serviceProtocol), ctypes.c_char_p(serviceName), port, ctypes.c_char_p(hostname), ctypes.c_char_p(protocol), function, ctypes.c_char_p(domain), context, ctypes.byref(ref), ctypes.byref(error))
     #    if error.value != libwstp.WSEOK:
     #        raise WSTPEnvironmentError(env, err)
     #    return mlink, ref
     #def register_link_service_from_link_server(self, serviceProtocol, serviceName, server, function, domain, context, ref, error):
     #    # MLDECL(void, MLRegisterLinkServiceFromLinkServer, (MLEnvironment env, const char *serviceProtocol, const char *serviceName, MLLinkServer server, MLRegisterCallbackFunction function, const char *domain, void *context, MLServiceRef *ref, int *error));
-    def stop_registering_link_service_for_link(self, link, ref):
-        '''MLStopRegisteringLinkServiceForLink'''
-        libwstp.WSStopRegisteringLinkServiceForLink(self.__environment, link, ref)
-        return True
-    def stop_registering_link_service(self, ref):
-        '''MLStopRegisteringLinkService'''
-        libwstp.WSStopRegisteringLinkService(self.__environment, ref)
-        return True
 
-    ## link servers
-    def link_server(self, context):
-        '''MLNewLinkServer'''
-        env, error = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSNewLinkServer, -1)))
-        server = libwstp.WSNewLinkServer(env, context, ctypes.byref(error))
-        if error.value != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, error.value)
-        return server
-    def new_link_server_with_port(self, port, context):
-        '''MLNewLinkServerWithPort'''
-        env, error = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSNewLinkServerWithPort, -1)))
-        server = libwstp.WSNewLinkServerWithPort(env, port, context, ctypes.byref(error))
-        if error.value != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, error.value)
-        return server
-    def new_link_server_with_port_and_interface(port, iface, context):
-        '''MLNewLinkServerWithPortAndInterface'''
-        env, error = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSNewLinkServerWithPortAndInterface, -1)))
-        server = libwstp.WSNewLinkServerWithPortAndInterface(env, port, iface, context, ctypes.byref(error))
-        if error.value != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, error.value)
-        return server
+    def __create_service(self, link, ref, context):
+        assert(operator.eq(*map(ctypes.sizeof, [server, ctypes.c_long])))
+        address, ctx = ctypes.cast(server, ctypes.c_long).value, None if context is None else ctypes.cast(context, ctypes.c_long).value
+
+        sanity = self._finalizers.get(address, None)
+        assert((sanity is None) or not(sanity.alive))
+        self._finalizers[address] = weakref.finalize(service, InternalEnvironment.destroy_service, utils.clone(server))
+        self._services[address] = service
+
+        if all(item is not None for item in [context, ctx]):
+            self._contextrefs[address] = context
+            self._finalizers[ctx] = weakref.finalize(service, self._contextrefs.pop, address, None)
+
+        index = len(self._services)
+        logging.warning("created service #{:d} ({:#x}){:s} and returning it as {!s}.".format(index, address, " with context ({:#x})".format(ctypes.addressof(context.value)) if context else '', service))
+        return WSLinkService(service)
+
+    #def stop_registering_link_service_for_link(self, link, ref):
+    #    '''MLStopRegisteringLinkServiceForLink'''
+    #    libwstp.WSStopRegisteringLinkServiceForLink(self._environment, link, ref)
+    #    return True
+    #def stop_registering_link_service(self, ref):
+    #    '''MLStopRegisteringLinkService'''
+    #    libwstp.WSStopRegisteringLinkService(self._environment, ref)
+    #    return True
+
+class WSLinkServiceReference(object):
+    def __init__(self, environment, serviceRef, context):
+        self._environment, self._ref, self._context = environment, serviceRef, context
+
+    @property
+    def protocol(self):
+        '''MLServiceProtocolFromReference'''
+        result = libwstp.WSServiceProtocolFromReference(self._environment, self._ref)
+        # FIXME: context
+        return result.contents
+
+# FIXME: these need to be implemented in a way that a user can derive from it.
+class WSLinkServiceBrowser(WSLinkServiceReference): pass
+class WSLinkServiceResolver(WSLinkServiceReference): pass
 
 class WSLinkServer(object):
-    def __init__(self, linkserver):
-        self.__linkserver = linkserver
-    def shutdown_link_server(self):
-        '''MLShutdownLinkServer'''
-        libwstp.WSShutdownLinkServer(self.__linkserver)
-        return True
+    def __init__(self, linkserver, context):
+        self._environment, self._linkserver, self._context = environment, linkserver, context
+
+    @property
+    def context(self):
+        return self.context_from_link_server()
+
+    @property
+    def port(self):
+        return self.port_from_link_server()
+
+    def context_from_link_server(self):
+        '''WSContextFromLinkServer'''
+        env, server, error = (item() for item in itertools.chain([lambda: self._environment, lambda:self._linkserver], utils.arguments(libwstp.WSContextFromLinkServer, -1)))
+        context = libwstp.WSContextFromLinkServer(server, ctypes.byref(error))
+        if error.value != libwstp.WSEOK:
+            raise WSTPEnvironmentError(env, error.value)
+        #FIXME: context
+        return context if context is None else context.contents
+
     def register_callback_function_with_link_server(self, function):
         '''WSRegisterCallbackFunctionWithLinkServer'''
-        libwstp.WSRegisterCallbackFunctionWithLinkServer(self.__linkserver, function)
+        libwstp.WSRegisterCallbackFunctionWithLinkServer(self._linkserver, function)
         return True
+
     def wait_for_new_link_from_link_server(self):
         '''WSWaitForNewLinkFromLinkServer'''
-        server, error = (item() for item in itertools.chain([lambda:self.__linkserver], utils.arguments(libwstp.WSWaitForNewLinkFromLinkServer, -1)))
+        env, server, error = (item() for item in itertools.chain([lambda:self._environment, lambda:self._linkserver], utils.arguments(libwstp.WSWaitForNewLinkFromLinkServer, -1)))
         mlink = libwstp.WSWaitForNewLinkFromLinkServer(server, ctypes.byref(error))
         if error.value != libwstp.WSEOK:
             raise WSTPEnvironmentError(env, error.value)
+
+        # FIXME: need to attach a link
         return mlink
+
     def port_from_link_server(self):
         '''WSPortFromLinkServer'''
-        server, error = (item() for item in itertools.chain([lambda:self.__linkserver], utils.arguments(libwstp.WSPortFromLinkServer, -1)))
+        env, server, error = (item() for item in itertools.chain([lambda:self._environment, lambda:self._linkserver], utils.arguments(libwstp.WSPortFromLinkServer, -1)))
         port = libwstp.WSPortFromLinkServer(server, ctypes.byref(error))
         if error.value != libwstp.WSEOK:
             raise WSTPEnvironmentError(env, error.value)
         return port
+
     def interface_from_link_server(self):
         '''WSInterfaceFromLinkServer'''
-        server, error = (item() for item in itertools.chain([lambda:self.__linkserver], utils.arguments(libwstp.WSInterfaceFromLinkServer, -1)))
+        env, server, error = (item() for item in itertools.chain([lambda:self._environment, lambda:self._linkserver], utils.arguments(libwstp.WSInterfaceFromLinkServer, -1)))
         iface = libwstp.WSInterfaceFromLinkServer(server, ctypes.byref(error))
         if error.value != libwstp.WSEOK:
             raise WSTPEnvironmentError(env, error.value)
-        return iface.contents   # FIXME: const char*
-    def context_from_link_server(self):
-        '''WSContextFromLinkServer'''
-        server, error = (item() for item in itertools.chain([lambda:self.__linkserver], utils.arguments(libwstp.WSContextFromLinkServer, -1)))
-        context = libwstp.WSContextFromLinkServer(server, ctypes.byref(error))
-        if error.value != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, error.value)
-        return context
-    def release_interface_from_link_server(self, iface):
-        '''WSReleaseInterfaceFromLinkServer'''
-        libwstp.WSReleaseInterfaceFromLinkServer(self.__linkserver, ctypes.c_char_p(iface))
-        return True
+
+        with utils.pstring(iface, functools.partial(libwstp.WSReleaseInterfaceFromLinkServer, iface)) as string:
+            result = string
+        return result   # FIXME: const char*
+
+    #def release_interface_from_link_server(self, iface):
+    #    '''WSReleaseInterfaceFromLinkServer'''
+    #    libwstp.WSReleaseInterfaceFromLinkServer(self._linkserver, ctypes.c_char_p(iface))
+    #    return True
+
+class WSLinkService(object):
+    def __init__(self, resolverRef, context):
+        self._ref, self._context = resolverRef, context
 
 class WSLink(object):
     def __init__(self, mlink):
-        self.__mlink = mlink
+        self._mlink = mlink
 
     def get_linked_env_id_string(self):
-        mlink, environment_id = (item() for item in itertools.chain([lambda:self.__environment], utils.arguments(libwstp.WSGetLinkedEnvIDString, -1)))
+        mlink, environment_id = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSGetLinkedEnvIDString, -1)))
         err = libwstp.WSGetLinkedEnvIDString(mlink, ctypes.byref(environment_id))
         if err != libwstp.WSEOK:
             raise WSTPEnvironmentError(env, err)
@@ -739,7 +1036,7 @@ if __name__ == '__main__':
     #print(hex(id(gc.get_referrers(x()))))
 
     #E = self = wstp.Environment()
-    #self.__environment = env
+    #self._environment = env
     #link = wstp.InternalEnvironment.create('intra')
     #print(link)
     #del(link)
