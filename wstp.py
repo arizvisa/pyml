@@ -7,18 +7,7 @@ import gc, weakref, codecs, ctypes, logging, libwstp
 
 ### exception types
 class WSTPException(Exception):
-    iterable = ((attribute, getattr(libwstp, attribute)) for attribute in dir(libwstp) if attribute.startswith('WSE'))
-    _WSErrorMap = {integer : name for name, integer in iterable if isinstance(integer, int)}
-    del(iterable)
-
-    @classmethod
-    def get(cls, code, *args):
-        return cls._WSErrorMap.get(code, *args) if args else cls._WSErrorCodes[code]
-
-    @classmethod
-    def string(cls, code):
-        description = cls._WSErrorMap.get(code, cls._WSErrorMap[libwstp.WSEUNKNOWN])
-        return "{:s}({:d})".format(description, code)
+    pass
 
 class WSTPSystemError(WSTPException, SystemError):
     pass
@@ -28,18 +17,38 @@ class WSTPErrorCode(WSTPException):
         self.code, string = code, self.string(code)
         self.args = code, string
 
-class WSTPErrorMessage(WSTPErrorCode):
+    @classmethod
+    def get(cls, code, *args):
+        return 'ERROR'
+
+    @classmethod
+    def string(cls, code):
+        return "{:s}({:d})".format('ERROR', code)
+
+class WSTPEnvironmentException(WSTPErrorCode):
+    iterable = ((attribute, getattr(libwstp, attribute)) for attribute in dir(libwstp) if attribute.startswith('WSE'))
+    _WSEnvironmentErrorMap = {integer : name for name, integer in iterable if isinstance(integer, int)}
+    del(iterable)
+
+    @classmethod
+    def get(cls, code, *args):
+        return cls._WSEnvironmentErrorMap.get(code, *args) if args else cls._WSEnvironmentErrorMap[code]
+
+    @classmethod
+    def string(cls, code):
+        description = cls._WSEnvironmentErrorMap.get(code, cls._WSEnvironmentErrorMap[libwstp.WSEUNKNOWN])
+        return "{:s}({:d})".format(description, code)
+
     def __init__(self, code, description, *args, **kwargs):
         self.code, string = code, self.string(code)
 
         kwargs.setdefault('code', code), kwargs.setdefault('error', string)
         self.args = code, string, description.format(*args, **kwargs)
 
-class WSTPEnvironmentError(WSTPSystemError):
+class WSTPEnvironmentError(WSTPEnvironmentException):
     def __init__(self, environment, code):
         assert(isinstance(environment, libwstp.WSEnvironment))
-        self.code, string, message = code, self.string(code), self.message(environment, code)
-        self.args = code, string, message
+        super(WSTPEnvironmentError, self).__init__(code, self.message(environment, code))
 
     @staticmethod
     def message(environment, err):
@@ -49,10 +58,41 @@ class WSTPEnvironmentError(WSTPSystemError):
 class WSTPEnvironmentErrorMessage(WSTPEnvironmentError):
     def __init__(self, environment, code, description='', *args, **kwargs):
         assert(isinstance(environment, libwstp.WSEnvironment))
-        self.code, string, message = code, self.string(code), self.message(environment, code)
-        kwargs.setdefault('code', code), kwargs.setdefault('error', string), kwargs.setdefault('message', message)
+        message = self.message(environment, code)
+        kwargs.setdefault('message', message)
+        super(WSTPEnvironmentError, self).__init__(code, description.format(*args, **kwargs) if description else message)
 
-        self.args = code, string, description.format(*args, **kwargs) if description else message
+class WSTPLinkException(WSTPSystemError):
+    iterable = ((attribute, getattr(libwstp, attribute)) for attribute in dir(libwstp) if attribute.startswith('MLE'))
+    _WSLinkErrorMap = {integer : name for name, integer in iterable if isinstance(integer, int)}
+    del(iterable)
+
+    @classmethod
+    def get(cls, code, *args):
+        return cls._WSLinkErrorMap.get(code, *args) if args else cls._WSLinkErrorMap[code]
+
+    @classmethod
+    def string(cls, code):
+        description = cls._WSLinkErrorMap.get(code, cls._WSLinkErrorMap[libwstp.MLEUNKNOWN])
+        return "{:s}({:d})".format(description, code)
+
+class WSTPLinkErrorCode(WSTPLinkException):
+    def __init__(self, code, description, *args, **kwargs):
+        self.code, string = code, self.string(code)
+
+        kwargs.setdefault('code', code), kwargs.setdefault('error', string)
+        self.args = code, string, description.format(*args, **kwargs)
+
+class WSTPLinkError(WSTPLinkErrorCode):
+    def __init__(self, link):
+        assert(isinstance(link, libwstp.WSLINK))
+        code, message = libwstp.WSError(link), self.message(link)
+        super(WSTPLinkErrorCode, self).__init__(code, message)
+
+    @staticmethod
+    def message(link):
+        string = libwstp.WSErrorMessage(link)
+        return string.decode('ascii')
 
 ### ctypes utilities
 class utils(object):
@@ -99,12 +139,12 @@ class utils(object):
         argtypes = func.argtypes
         if isinstance(number, slice):
             listable = [argtypes[index] for index in range(*number.indices(len(argtypes)))]
-            assert(all(issubclass(arg, ctypes._Pointer) for arg in listable))
-            return tuple(arg._type_ for arg in listable)
+            assert(any(issubclass(arg, ctypes._Pointer) for arg in listable))
+            return tuple((arg._type_ if issubclass(arg, ctypes._Pointer) else arg) for arg in listable)
         return cls.arguments(func, slice(None, number) if number >= 0 else slice(number, None))
 
     @classmethod
-    def __pointer_pointers_thing(cls, object, length, transform, release):
+    def pointer_pointers_thing(cls, object, length, transform, release):
         target = ctypes.POINTER(ctypes.c_void_p * getattr(length, 'value', length))
         return cls(object, target, transform, *release)
 
@@ -112,17 +152,17 @@ class utils(object):
     def pstrings(cls, object, length, *callable):
         def strings(object):
             return [ctypes.string_at(item) for item in object]
-        return cls.__pointer_pointers_thing(object, length, strings, callable)
+        return cls.pointer_pointers_thing(object, length, strings, callable)
 
     @classmethod
     def pwstrings(cls, object, length, *callable):
         def wstrings(object):
             raise NotImplementedError   # FIXME
             return [ctypes.string_at(item) for item in object]
-        return cls.__pointer_pointers_thing(object, length, wstrings, callable)
+        return cls.pointer_pointers_thing(object, length, wstrings, callable)
 
     @classmethod
-    def __pointer_things(cls, object, target, length, release):
+    def pointer_things(cls, object, target, length, release):
         target = ctypes.POINTER(target * getattr(length, 'value', length))
         def items(object):
             return [item.contents for item in object]
@@ -130,58 +170,62 @@ class utils(object):
 
     @classmethod
     def psingles(cls, object, length, *callable):
-        return cls.__pointer_things(object, ctypes.c_float, length, callable)
+        return cls.pointer_things(object, ctypes.c_float, length, callable)
 
     @classmethod
     def pdoubles(cls, object, length, *callable):
-        return cls.__pointer_things(object, ctypes.c_double, length, callable)
+        return cls.pointer_things(object, ctypes.c_double, length, callable)
 
     @classmethod
     def psint16s(cls, object, length, *callable):
-        return cls.__pointer_things(object, ctypes.c_short, length, callable)
+        return cls.pointer_things(object, ctypes.c_short, length, callable)
 
     @classmethod
     def puint16s(cls, object, length, *callable):
-        return cls.__pointer_things(object, ctypes.c_ushort, length, callable)
+        return cls.pointer_things(object, ctypes.c_ushort, length, callable)
 
     @classmethod
     def psint32s(cls, object, length, *callable):
-        return cls.__pointer_things(object, ctypes.c_int, length, callable)
+        return cls.pointer_things(object, ctypes.c_int, length, callable)
 
     @classmethod
     def puint32s(cls, object, length, *callable):
-        return cls.__pointer_things(object, ctypes.c_uint, length, callable)
+        return cls.pointer_things(object, ctypes.c_uint, length, callable)
 
     assert(ctypes.sizeof(ctypes.c_long) == 8)
     @classmethod
     def psint64s(cls, object, length, *callable):
-        return cls.__pointer_things(object, ctypes.c_long, length, callable)
+        return cls.pointer_things(object, ctypes.c_long, length, callable)
 
     assert(ctypes.sizeof(ctypes.c_ulong) == 8)
     @classmethod
     def puint64s(cls, object, length, *callable):
-        return cls.__pointer_things(object, ctypes.c_ulong, length, callable)
+        return cls.pointer_things(object, ctypes.c_ulong, length, callable)
 
     assert(ctypes.sizeof(ctypes.c_longdouble) == 16)
     @classmethod
     def psint128s(cls, object, length, *callable):
-        return cls.__pointer_things(object, ctypes.c_ulongdouble, length, callable)
+        return cls.pointer_things(object, ctypes.c_ulongdouble, length, callable)
 
     assert(ctypes.sizeof(ctypes.c_longdouble) == 16)
     @classmethod
     def puint128s(cls, object, length, *callable):
         # FIXME: need to manually create a structure here because...ctypes.
-        return cls.__pointer_things(object, ctypes.c_ulongdouble, length, callable)
+        return cls.pointer_things(object, ctypes.c_ulongdouble, length, callable)
 
     @classmethod
-    def __pointer_thing(cls, object, target, release):
+    def pbytes(cls, object, length, *callable):
+        return cls.pointer_things(object, ctypes.c_ubyte, length, callable)
+
+    @classmethod
+    def pointer_thing(cls, object, target, release):
         return cls(object, target, None, *release)
 
     @classmethod
     def pstring(cls, object, *callable):
         target = ctypes.POINTER(ctypes.c_void_p)
         def string(object):
-            return ctypes.string_at(object)
+            return ctypes.string_at(ctypes.pointer(object))
         return cls(object, target, string, *callable)
 
     @classmethod
@@ -194,54 +238,89 @@ class utils(object):
     @classmethod
     def puint16(cls, object, *callable):
         target = ctypes.POINTER(ctypes.c_ushort)
-        return cls.__pointer_thing(object, target, callable)
+        return cls.pointer_thing(object, target, callable)
     @classmethod
     def psint16(cls, object, *callable):
         target = ctypes.POINTER(ctypes.c_short)
-        return cls.__pointer_thing(object, target, callable)
+        return cls.pointer_thing(object, target, callable)
 
     @classmethod
     def puint32(cls, object, *callable):
         target = ctypes.POINTER(ctypes.c_uint)
-        return cls.__pointer_thing(object, target, callable)
+        return cls.pointer_thing(object, target, callable)
     @classmethod
     def psint32(cls, object, *callable):
         target = ctypes.POINTER(ctypes.c_int)
-        return cls.__pointer_thing(object, target, callable)
+        return cls.pointer_thing(object, target, callable)
 
     assert(ctypes.sizeof(ctypes.c_ulong) == 8)
     @classmethod
     def puint64(cls, object, *callable):
         target = ctypes.POINTER(ctypes.c_ulong)
-        return cls.__pointer_thing(object, target, callable)
+        return cls.pointer_thing(object, target, callable)
     assert(ctypes.sizeof(ctypes.c_long) == 8)
     @classmethod
     def psint64(cls, object, *callable):
         target = ctypes.POINTER(ctypes.c_long)
-        return cls.__pointer_thing(object, target, callable)
+        return cls.pointer_thing(object, target, callable)
 
     assert(ctypes.sizeof(ctypes.c_longdouble) == 16)
     @classmethod
     def puint128(cls, object, *callable):
         # FIXME: need to manually create a structure here because...ctypes.
         target = ctypes.POINTER(ctypes.c_ulong)
-        return cls.__pointer_thing(object, target, callable)
+        return cls.pointer_thing(object, target, callable)
 
     assert(ctypes.sizeof(ctypes.c_longdouble) == 16)
     @classmethod
     def psint128(cls, object, *callable):
         target = ctypes.POINTER(ctypes.c_long)
-        return cls.__pointer_thing(object, target, callable)
+        return cls.pointer_thing(object, target, callable)
 
     @classmethod
     def psingle(cls, object, *callable):
         target = ctypes.POINTER(ctypes.c_float)
-        return cls.__pointer_thing(object, target, callable)
+        return cls.pointer_thing(object, target, callable)
 
     @classmethod
     def pdouble(cls, object, *callable):
         target = ctypes.POINTER(ctypes.c_double)
-        return cls.__pointer_thing(object, target, callable)
+        return cls.pointer_thing(object, target, callable)
+
+    class string(object):
+        _utf8 = codecs.lookup('utf-8')
+        _utf16 = codecs.lookup('utf-16-le')
+        _utf32 = codecs.lookup('utf-32-le')
+        @classmethod
+        def _cast(cls, source, target):
+            return ctypes.cast(ctypes.pointer(source), ctypes.POINTER(target)).contents
+        @classmethod
+        def put_utf8(cls, string):
+            bytes, length = cls._utf8.encode(string)
+            return length, (ctypes.c_ubyte * len(bytes))(*bytearray(bytes))
+        @classmethod
+        def put_utf16(cls, string):
+            bytes, length = cls._utf16.encode(string)
+            return cls._cast((ctypes.c_ubyte * len(bytes))(*bytearray(bytes)), ctypes.c_ushort * length)
+        @classmethod
+        def put_utf32(cls, string):
+            bytes, length = cls._utf32.encode(string)
+            return cls._cast((ctypes.c_ubyte * len(bytes))(*bytearray(bytes)), ctypes.c_uint * length)
+        @classmethod
+        def get_utf8(cls, array):
+            res, length = cls._utf8.decode(bytearray(array))
+            return length, res
+        @classmethod
+        def get_utf16(cls, array):
+            bytes = cls._cast(array, ctypes.c_ubyte * ctypes.sizeof(array))
+            res, length = cls._utf16.decode(bytearray(array))
+            return length, res
+        @classmethod
+        def get_utf32(cls, array):
+            bytes = cls._cast(array, ctypes.c_ubyte * ctypes.sizeof(array))
+            res, length = cls._utf32.decode(bytearray(array))
+            return length, res
+        get_ucs2, put_ucs2 = get_utf16, put_utf16
 
 # FIXME: there's absolutely no reason for this to be a singleton, as we really
 #        only need some place to store references to initialized environments
@@ -254,8 +333,8 @@ class InternalEnvironment(object):
     _encodings = {
         codecs.lookup('ascii'): libwstp.MLASCII_ENC,
         codecs.lookup('utf8'): libwstp.MLUTF8_ENC,
-        codecs.lookup('utf16'): libwstp.MLUTF16_ENC,
-        codecs.lookup('utf32'): libwstp.MLUTF32_ENC,
+        codecs.lookup('utf-16'): libwstp.MLUTF16_ENC, codecs.lookup('utf-16-le'): libwstp.MLUTF16_ENC, codecs.lookup('utf-16-be'): libwstp.MLUTF16_ENC,
+        codecs.lookup('utf-32'): libwstp.MLUTF32_ENC, codecs.lookup('utf-32-le'): libwstp.MLUTF32_ENC, codecs.lookup('utf-32-be'): libwstp.MLUTF32_ENC,
 
         'bytes': libwstp.MLBYTES_ENC, bytes: libwstp.MLBYTES_ENC, None: libwstp.MLBYTES_ENC,
         'ucs2': libwstp.MLUCS2_ENC,
@@ -493,7 +572,7 @@ class Environment(object):
     def version(self):
         env, inumb, rnumb, bnumb = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSVersionNumbers, -3)))
         libwstp.WSVersionNumbers(self._environment, ctypes.byref(inumb), ctypes.byref(rnumb), ctypes.byref(bnumb))
-        return inumb, rnumb, bnumb
+        return inumb.value, rnumb.value, bnumb.value
 
     def compiler_id(self):
         env, id = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSCompilerID, -1)))
@@ -596,7 +675,7 @@ class Environment(object):
         return {string for string in decoded}
 
     def _available_link_protocol_names(self):
-        available, candidates  = self.protocols, {ch for ch in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'}
+        available, candidates  = self.available_link_protocol_names, {ch for ch in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'}
         original = {proto : proto for proto in available}
         mixed, lower = {}, {proto.lower() : proto for proto in available if proto.upper() == proto}
         for proto in available:
@@ -606,6 +685,8 @@ class Environment(object):
             index = next(iterable, 0)
             if index:
                 mixed[proto[:index].casefold()] = proto
+            else:
+                mixed[proto.casefold()] = proto
             continue
 
         result = {}
@@ -613,12 +694,12 @@ class Environment(object):
         return result
 
     ## WSLink
-    def Connect(self, protocol, name=None):
-        return self.__create_link(name, protocol, 'connect')
-    def Create(self, protocol, name=None):
-        return self.__create_link(name, protocol, 'create')
-    def Launch(self, protocol, name=None):
-        return self.__create_link(name, protocol, 'launch')
+    def Connect(self, name, *args, **parameters):
+        return self.__create_link('connect', name, *args, **parameters)
+    def Create(self, name, *args, **parameters):
+        return self.__create_link('create', name, *args, **parameters)
+    def Launch(self, name, *args, **parameters):
+        return self.__create_link('launch', name, *args, **parameters)
     def Close(self, wslink):
         env, identifier = self._environment, wslink if isinstance(wslink, int) else libwstp.WSToLinkID(wslink)
         link = self._links.pop(identifier, libwstp.WSFromLinkID(env, identifier))
@@ -638,22 +719,24 @@ class Environment(object):
             result = links
         return result
 
-    def __create_link(self, name, protocol, type):
-        parameters.setdefault('-name', name) if name else None
+    def __create_link(self, type, name, *args, **parameters):
+        if 'linkprotocol' in parameters:
+            protocol = parameters.pop('linkprotocol')
+            available = self._available_link_protocol_names()
+            assert(available.get(protocol, available.get(protocol.casefold())) is not None)
+            selected = available[protocol] if protocol in available else available[protocol.casefold()]
+            parameters['linkprotocol'] = selected
 
-        available = self._available_link_protocol_names()
-        assert(available.get(protocol, available.get(protocol.casefold())) is not None)
-        selected = available[protocol] if protocol in available else available[protocol.casefold()]
-        parameters = {'-linkprotocol': selected}
+        assert(type.casefold() in {item for item in map(operator.methodcaller('casefold'), ['connect', 'create', 'launch'])})
+        parameters.setdefault('linkname', "{!s}".format(name)) if name else None
 
-        assert(type.lower() in {'connect', 'create', 'launch'})
-        iterable = itertools.chain(["-link{:s}".format(type.lower())], *[(key, value) for key, value in parameters.items()])
-        argv = [arg for arg in iterable]
+        iterable = itertools.chain(["-link{:s}".format(type.lower())], *[("-{:s}".format(key), value) for key, value in parameters.items()])
+        argv = [arg for arg in itertools.chain(iterable, args)]
 
         env, error = self._environment, utils.argument(libwstp.WSOpenString, -1)(libwstp.WSEUNKNOWN)
         link = libwstp.WSOpenString(env, ' '.join(argv), ctypes.byref(error))
         if not(link) or error.value != libwstp.WSEOK:
-            raise WSTPEnvironmentErrorMessage(env, error.value, "unable to {:s} link{:s} with protocol {:s} ({message})", type.lower(), " \"{:s}\"".format(name) if name else '', parameters['-linkprotocol'])
+            raise WSTPEnvironmentErrorMessage(env, error.value, "unable to {:s} link{:s} ({message})", type.lower(), " \"{:s}\"".format(name) if name else '')
 
         identifier = libwstp.WSToLinkID(link)
         sanity = self._finalizers.get(identifier, None)
@@ -664,7 +747,7 @@ class Environment(object):
 
         description = libwstp.WSLinkName(link)
         logging.warning("created link #{:d} ({:#x}) with name \"{:s}\" and returning it as {!s}.".format(index, identifier, description.decode('ascii'), link))
-        return link
+        return WSLink(link)
 
     # interacts with links that are cached.
     def get_link(self, wslink):
@@ -897,6 +980,25 @@ class Environment(object):
     #    libwstp.WSStopRegisteringLinkService(self._environment, ref)
     #    return True
 
+    def ready_parallel(self, links, waittime=None):
+        assert(all(isinstance(link, (WSLink, libwstp.WSLINK)) for link in links))
+        if waittime is not None:
+            fraction, integer = math.modf(waittime)
+            seconds, useconds = integer, fraction * 1e6
+        else:
+            seconds, useconds = -1, -1
+        tv = libwstp.wstimeval(seconds, useconds)
+
+        items = [(link._mlink if isinstance(link, WSLink) else link) for link in links]
+        mlinks = (libwstp.WSLINK * len(items))(*items)
+        index = libwstp.WSReadyParallel(self._environment, ctypes.byref(mlinks), len(items), tv)
+
+        if index == libwstp.MLREADYPARALLELERROR:
+            return False
+        elif index == libwstp.MLREADYPARALLELTIMEDOUT:
+            return False
+        return links[index]
+
 class WSLinkServiceReference(object):
     def __init__(self, environment, serviceRef, context):
         self._environment, self._ref, self._context = environment, serviceRef, context
@@ -980,15 +1082,563 @@ class WSLink(object):
     def __init__(self, mlink):
         self._mlink = mlink
 
+    def activate(self):
+        mlink = self._mlink
+        if not libwstp.WSActivate(mlink):
+            raise WSTPLinkError(mlink)
+        return
+
     def get_linked_env_id_string(self):
-        mlink, environment_id = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSGetLinkedEnvIDString, -1)))
+        mlink, environment_id = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetLinkedEnvIDString, -1)))
         err = libwstp.WSGetLinkedEnvIDString(mlink, ctypes.byref(environment_id))
         if err != libwstp.WSEOK:
-            raise WSTPEnvironmentError(env, err)
+            raise WSTPEnvironmentException(err, 'unable to get linked environment id')
 
         with utils.pstring(environment_id, functools.partial(libwstp.WSReleaseEnvIDString, mlink)) as environment_id:
             result = environment_id
         return result
+
+    @property
+    def name(self):
+        mlink = self._mlink
+        return libwstp.WSName(mlink)
+
+    @property
+    def link_name(self):
+        '''WSLinkName/WSReleaseLinkName'''
+        mlink = self._mlink
+        return libwstp.WSLinkName(mlink)
+
+    #MLDECL( const unsigned short *, MLUCS2LinkName,  (MLINK mlp, int *length));
+    #MLDECL( const unsigned char *,  MLUTF8LinkName,  (MLINK mlp, int *length));
+    #MLDECL( const unsigned short *, MLUTF16LinkName, (MLINK mlp, int *length));
+    #MLDECL( const unsigned int *,   MLUTF32LinkName, (MLINK mlp, int *length));
+
+    #MLDECL(void, MLReleaseUCS2LinkName,  (MLINK mlp, const unsigned short *name, int length));
+    #MLDECL(void, MLReleaseUTF8LinkName,  (MLINK mlp, const unsigned char *name, int length));
+    #MLDECL(void, MLReleaseUTF16LinkName, (MLINK mlp, const unsigned short *name, int length));
+    #MLDECL(void, MLReleaseUTF32LinkName, (MLINK mlp, const unsigned int *name, int length));
+
+    @property
+    def number(self):
+        '''WSNumber'''
+        mlink = self._mlink
+        return libwstp.WSNumber(mlink)
+
+    @property
+    def is_link_loopback(self):
+        '''MLIsLinkLoopback'''
+        mlink = self._mlink
+        return libwstp.WSIsLinkLoopback(mlink)
+
+    def error(self):
+        '''MLError'''
+        mlink = self._mlink
+        return libwstp.WSError(mlink)
+
+    def clear_error(self):
+        '''MLClearError'''
+        mlink = self._mlink
+        return libwstp.WSClearError(mlink)
+
+    def set_error(self, err):
+        '''MLSetError'''
+        mlink = self._mlink
+        return libwstp.WSSetError(mlink, err)
+
+    def put_message(self, msg):
+        '''MLPutMessage'''
+        mlink = self._mlink
+        if not libwstp.WSPutMessage(mlink, msg):
+            raise WSTPLinkError(mlink)
+        return
+    def get_message(self):
+        '''MLGetMessage'''
+        mlink, mp, np = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetMessage, -2)))
+        res = libwstp.WSGetMessage(mlink, ctypes.byref(mp), ctypes.byref(np))
+        return res, mp.value, np.value
+    def message_ready(self):
+        '''MLMessageReady'''
+        mlink = self._mlink
+        res = libwstp.WSMessageReady(mlink)
+        return True if res else False
+    def put_message_with_arg(self, msg, arg):
+        '''MLPutMessageWithArg'''
+        mlink = self._mlink
+        if not libwstp.WSPutMessageWithArg(mlink, msg, arg):
+            raise WSTPLinkError(mlink)
+        return
+
+    def low_level_device_name(self):
+        '''WSLowLevelDeviceName/WSReleaseLowLevelDeviceName'''
+        mlink, name = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSLowLevelDeviceName, -1)))
+        if not libwstp.WSLowLevelDeviceName(mlink, ctypes.byref(name)):
+            raise WSTPLinkError(mlink)
+
+        with utils.pstring(name, functools.partial(libwstp.WSReleaseLowLevelDeviceName, mlink)) as string:
+            result = string
+        return result
+
+    def new_packet(self):
+        mlink = self._mlink
+        if not libwstp.WSNewPacket(mlink):
+            raise WSTPLinkError(mlink)
+        return
+    def next_packet(self):
+        mlink = self._mlink
+        if not libwstp.WSNextPacket(mlink):
+            raise WSTPLinkError(mlink)
+        return
+    @property
+    def ready(self):
+        mlink = self._mlink
+        res = libwstp.WSReady(mlink)
+        return True if res else False
+    def wait_for_link_activity(self):
+        mlink = self._mlink
+        res = libwstp.WSWaitForLinkActivity(mlink)
+        if res == libwstp.MLWAITERROR:
+            return Exception
+        elif res == libwstp.MLWAITSUCCESS:
+            return True
+        return False
+    def wait_for_link_activity_with_callback(self, callback):
+        assert(isinstance(callback, WSLinkWaitCallBackObject))
+        mlink = self._mlink
+        res = libwstp.WSWaitForLinkActivityWithCallback(mlink, callback)
+        if res == libwstp.MLWAITERROR:
+            return Exception
+        elif res == libwstp.MLWAITSUCCESS:
+            return True
+        return False
+
+    def get_next(self):
+        mlink = self._mlink
+        return libwstp.WSGetNext(mlink)
+    def get_next_raw(self):
+        mlink = self._mlink
+        return libwstp.WSGetNextRaw(mlink)
+    def get_type(self):
+        mlink = self._mlink
+        return libwstp.WSGetType(mlink)
+    def get_raw_type(self):
+        return libwstp.WSGetRawType(mlink)
+    def take_last(self, eleft):
+        mlink = self._mlink
+        return libwstp.WSTakeLast(mlink, eleft)
+    def fill(self):
+        mlink = self._mlink
+        if not libwstp.WSFill(mlink):
+            raise WSTPLinkError(mlink)
+        return
+    def get_arg_count(self):
+        mlink, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetArgCount, -1)))
+        if not libwstp.WSGetArgCount(mlink, ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        return countp
+    def get_raw_arg_count(self):
+        mlink, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetRawArgCount, -1)))
+        if not libwstp.WSGetRawArgCount(mlink, ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        return countp
+    def bytes_to_get(self):
+        mlink, leftp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSBytesToGet, -1)))
+        if not libwstp.WSBytesToGet(mlink, ctypes.byref(leftp)):
+            raise WSTPLinkError(mlink)
+        return leftp
+    def raw_bytes_to_get(self):
+        mlink, leftp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSRawBytesToGet, -1)))
+        if not libwstp.WSRawBytesToGet(mlink, ctypes.byref(leftp)):
+            raise WSTPLinkError(mlink)
+        return leftp
+    def expressions_to_get(self):
+        mlink, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSExpressionsToGet, -1)))
+        if not libwstp.WSExpressionsToGet(mlink, ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        return countp
+    def get_raw_data(self):
+        mlink, gotp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetRawData, -1)))
+        data = (ctypes.c_ubyte * self.bytes_to_get(mlink))()
+        if not libwstp.WSGetRawData(mlink, ctypes.byref(data), ctypes.sizeof(data), ctypes.byref(gotp)):
+            raise WSTPLinkError(mlink)
+        return gotp, data
+    def get_data(self):
+        mlink, gotp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetData, -1)))
+        data = (ctypes.c_ubyte * self.bytes_to_get(mlink))()        # libwstp.String?
+        if not libwstp.WSGetData(mlink, ctypes.byref(data), ctypes.sizeof(data), ctypes.byref(gotp)):
+            raise WSTPLinkError(mlink)
+        return gotp, data
+
+    def end_packet(self):
+        mlink = self._mlink
+        if not libwstp.WSEndPacket(mlink):
+            raise WSTPLinkError(mlink)
+        return
+    def flush(self):
+        mlink = self._mlink
+        if not libwstp.WSFlush(mlink):
+            raise WSTPLinkError(mlink)
+        return
+    def put_next(self, tok):
+        mlink = self._mlink
+        if not libwstp.WSPutNext(mlink, tok):
+            raise WSTPLinkError(mlink)
+        return
+    def put_type(self, tok):
+        mlink = self._mlink
+        if not libwstp.WSPutType(mlink, tok):
+            raise WSTPLinkError(mlink)
+        return
+    def put_raw_size(self, size):
+        mlink = self._mlink
+        if not libwstp.WSPutRawSize(mlink, size):
+            raise WSTPLinkError(mlink)
+        return
+    def put_arg_count(self, argc):
+        mlink = self._mlink
+        if not libwstp.WSPutArgCount(mlink, argc):
+            raise WSTPLinkError(mlink)
+        return
+    def put_composite(self, argc):
+        mlink = self._mlink
+        if not libwstp.WSPutComposite(mlink, argc):
+            raise WSTPLinkError(mlink)
+        return
+    def bytes_to_put(self):
+        mlink, leftp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSBytesToGet, -1)))
+        if not libwstp.WSBytesToPut(mlink, ctypes.byref(leftp)):
+            raise WSTPLinkError(mlink)
+        return leftp
+    def put_raw_data(self, data):
+        buffer = ctypes.c_buffer(data)
+        if not libwstp.WSPutRawData(mlink, ctypes.byref(buffer), len(data)):
+            raise WSTPLinkError(mlink)
+        return ctypes.sizeof(buffer)
+
+    def get_binary_number(self, type):
+        raise NotImplementedError('MLDECL( int,   MLGetBinaryNumber,  ( MLINK mlp, void *np, long type));')
+
+    def get_integer_8(self):
+        mlink, cp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetInteger8, -1)))
+        if not libwstp.WSGetInteger8(mlink, ctypes.byref(cp)):
+            raise WSTPLinkError(mlink)
+        return cp
+    def get_integer_16(self):
+        mlink, hp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetInteger16, -1)))
+        if not libwstp.WSGetInteger16(mlink, ctypes.byref(hp)):
+            raise WSTPLinkError(mlink)
+        return hp
+    def get_integer_32(self):
+        mlink, ip = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetInteger32, -1)))
+        if not libwstp.WSGetInteger32(mlink, ctypes.byref(ip)):
+            raise WSTPLinkError(mlink)
+        return ip
+    def get_integer_64(self):
+        mlink, wp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetInteger64, -1)))
+        if not libwstp.WSGetInteger64(mlink, ctypes.byref(wp)):
+            raise WSTPLinkError(mlink)
+        return wp
+    def put_integer_8(self, i):
+        mlink = self._mlink
+        if not libwstp.WSPutInteger8(mlink, i):
+            raise WSTPLinkError(mlink)
+        return
+    def put_integer_16(self, i):
+        mlink = self._mlink
+        if not libwstp.WSPutInteger16(mlink, i):
+            raise WSTPLinkError(mlink)
+        return
+    def put_integer_32(self, h):
+        mlink = self._mlink
+        if not libwstp.WSPutInteger32(mlink, h):
+            raise WSTPLinkError(mlink)
+        return
+    def put_integer_64(self, w):
+        mlink = self._mlink
+        if not libwstp.WSPutInteger64(mlink, w):
+            raise WSTPLinkError(mlink)
+        return
+
+    def get_real_32(self):
+        mlink, fp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetReal32, -1)))
+        if not libwstp.WSGetReal32(mlink, ctypes.byref(fp)):
+            raise WSTPLinkError(mlink)
+        return fp
+    def get_real_64(self):
+        mlink, dp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetReal64, -1)))
+        if not libwstp.WSGetReal64(mlink, ctypes.byref(dp)):
+            raise WSTPLinkError(mlink)
+        return dp
+    def get_real_128(self):
+        mlink, dp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetReal128, -1)))
+        if not libwstp.WSGetReal128(mlink, ctypes.byref(dp)):
+            raise WSTPLinkError(mlink)
+        return dp
+    def put_real_32(self, f):
+        mlink = self._mlink
+        if not libwstp.WSPutReal32(mlink, f):
+            raise WSTPLinkError(mlink)
+        return
+    def put_real_64(self, d):
+        mlink = self._mlink
+        if not libwstp.WSPutReal64(mlink, d):
+            raise WSTPLinkError(mlink)
+        return
+    def put_real_128(self, x):
+        mlink = self._mlink
+        if not libwstp.WSPutReal128(mlink, x):
+            raise WSTPLinkError(mlink)
+        return
+
+    def get_byte_string(self, missing):
+        mlink, sp, lenp, _ = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetByteString, -3)))
+        if not libwstp.WSGetByteString(mlink, ctypes.byref(sp), ctypes.byref(lenp), missing):
+            raise WSTPLinkError(mlink)
+
+        with utils.pbytes(sp, functools.partial(libwstp.WSReleaseByteString, mlink)) as bytes:
+            result = bytes
+        return lenp, result
+    def get_string(self):
+        mlink, sp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetString, -1)))
+        if not libwstp.WSGetString(mlink, ctypes.byref(sp)):
+            raise WSTPLinkError(mlink)
+
+        with utils.pstring(sp, functools.partial(libwstp.WSReleaseString, mlink)) as string:
+            result = string
+        return result
+    def put_byte_string(self, s):
+        mlink, string = self._mlink, (ctypes.c_ubyte * len(s))(s)
+        if not libwstp.WSPutByteString(mlink, ctypes.byref(string), len(s)):
+            raise WSTPLinkError(mlink)
+        return
+    def put_string(self, s):
+        mlink = self._mlink
+        if not libwstp.WSPutString(mlink, ctypes.c_char_p(s)):
+            raise WSTPLinkError(mlink)
+        return
+
+    def get_ucs2_string(self):
+        mlink, sp, lenp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetUCS2String, -1)))
+        if not libwstp.WSGetUCS2String(mlink, ctypes.byref(sp), ctypes.byref(lenp)):
+            raise WSTPLinkError(mlink)
+        with utils.pstring(sp, functools.partial(libwstp.WSReleaseUCS2String, mlink), lenp) as string:
+            result = string
+        return result
+    def get_utf8_string(self):
+        mlink, sp, bytes, chars = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetUTF8String, -3)))
+        if not libwstp.WSGetUTF8String(mlink, ctypes.byref(sp), ctypes.byref(bytes), ctypes.byref(chars)):
+            raise WSTPLinkError(mlink)
+        with utils.pbytes(sp, functools.partial(libwstp.WSReleaseUTF8String, mlink), bytes) as string:
+            result = string
+        return result
+    def get_utf16_string(self):
+        mlink, sp, bytes, chars = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetUTF16String, -3)))
+        if not libwstp.WSGetUTF16String(mlink, ctypes.byref(sp), ctypes.byref(bytes), ctypes.byref(chars)):
+            raise WSTPLinkError(mlink)
+        with utils.pbytes(sp, functools.partial(libwstp.WSReleaseUTF16String, mlink), bytes) as string:
+            result = string
+        return result
+    def get_utf32_string(self):
+        mlink, sp, bytes, chars = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetUTF32String, -3)))
+        if not libwstp.WSGetUTF32String(mlink, ctypes.byref(sp), ctypes.byref(bytes), ctypes.byref(chars)):
+            raise WSTPLinkError(mlink)
+        with utils.pbytes(sp, functools.partial(libwstp.WSReleaseUTF32String, mlink), bytes) as string:
+            result = string
+        return result
+    def put_ucs2_string(self, s):
+        #FIXME: c_ushort
+        mlink = self._mlink
+        if not libwstp.WSPutUCS2String(mlink, ctypes.c_char_p(s), len(s)):
+            raise WSTPLinkError(mlink)
+        return
+    def put_utf8_string(self, s):
+        #FIXME: c_ubyte
+        encoded = s.encode('utf-8')
+        mlink, s = self._mlink, (ctypes.c_ubyte * len(encoded))(encoded)
+        if not libwstp.WSPutUTF8String(mlink, ctypes.byref(s), len(encoded)):
+            raise WSTPLinkError(mlink)
+        return
+    def put_utf16_string(self, s):
+        #FIXME: c_ushort
+        encoded = s.encode('utf-16')
+        mlink, s = self._mlink, (ctypes.c_ushort * len(s))(encoded)
+        if not libwstp.WSPutUTF16String(mlink, ctypes.byref(s), len(encoded)):
+            raise WSTPLinkError(mlink)
+        return
+    def put_utf32_string(self, s):
+        #FIXME: c_uint
+        encoded = s.encode('utf-32')
+        mlink, s = self._mlink, (ctypes.c_uint * len(s))(encoded)
+        if not libwstp.WSPutUTF32String(mlink, ctypes.byref(s), len(encoded)):
+            raise WSTPLinkError(mlink)
+        return
+
+    def get_number_as_string(self):
+        mlink, sp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetNumberAsString, -1)))
+        if not libwstp.WSGetNumberAsString(mlink, ctypes.byref(sp)):
+            raise WSTPLinkError(mlink)
+        with utils.pstring(sp, functools.partial(libwstp.WSReleaseString, mlink)) as string:
+            result = string
+        return result
+    def get_number_as_byte_string(self, missing):
+        mlink, sp, lenp, _ = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetNumberAsByteString, -3)))
+        if not libwstp.WSGetNumberAsByteString(mlink, ctypes.byref(sp), ctypes.byref(lenp), missing):
+            raise WSTPLinkError(mlink)
+        with utils.pbytes(sp, functools.partial(libwstp.WSReleaseByteString, mlink)) as bytesj:
+            result = bytes
+        return lenp, result
+    def put_real_number_as_string(self, s):
+        mlink, s = self._mlink, ctypes.c_char_p(s)
+        if not libwstp.WSPutRealNumberAsString(mlink, s):
+            raise WSTPLinkError(mlink)
+        return
+    def put_real_number_as_byte_string(self, s):
+        mlink, s = self._mlink, (ctypes.c_char * len(s))(s)
+        if not libwstp.WSPutRealNumberAsString(mlink, ctypes.byref(s)):
+            raise WSTPLinkError(mlink)
+        return
+
+    def put_size(self, size):
+        mlink = self._mlink
+        if not libwstp.WSPutSize(mlink, size):
+            raise WSTPLinkError(mlink)
+        return
+    def put_data(self, buff):
+        mlink, data = self._mlink, (ctypes.c_ubyte * self.bytes_to_get(mlink))(buff)    # libwstp.String?
+        if not libwstp.WSPutData(mlink, ctypes.byref(data), len(buff)):
+            raise WSTPLinkError(mlink)
+        return
+
+    def test_string(self, name):
+        mlink, string = self._mlink, ctypes.c_char_p(name)    # libwstp.String
+        if not libwstp.WSTestString(mlink, string):
+            raise WSTPLinkError(mlink)
+        return
+    def test_ucs2_string(self, name):
+        self, string = self._mlink, (ctypes.c_ushort * len(name))(name)
+        if not libwstp.WSTestUCS2String(mlink, string, len(name)):
+            raise WSTPLinkError(mlink)
+        return
+    def test_utf8_string(self, name):
+        mlink, string = self._mlink, (ctypes.c_ubyte * len(name))(name)
+        if not libwstp.WSTestUTF8String(mlink, string, len(name)):
+            raise WSTPLinkError(mlink)
+        return
+    def test_utf16_string(self, name):
+        mlink, string = self._mlink, (ctypes.c_ushort * len(name))(name)
+        if not libwstp.WSTestUTF16String(mlink, string, len(name)):
+            raise WSTPLinkError(mlink)
+        return
+    def test_utf32_string(self, name):
+        mlink, string = self._mlink, (ctypes.c_uint * len(name))(name)
+        if not libwstp.WSTestUTF32String(mlink, string, len(name)):
+            raise WSTPLinkError(mlink)
+        return
+
+    def get_symbol(self):
+        mlink, sp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetByteSymbol, -1)))
+        if not libwstp.WSGetSymbol(mlink, ctypes.byref(sp)):
+            raise WSTPLinkError(mlink)
+        res = sp.contents
+        libwstp.WSReleaseSymbol(mlink, sp)
+        return res
+    def put_symbol(self, s):
+        if not libwstp.WSGetSymbol(mlink, ctypes.c_char_p(s)):
+            raise WSTPLinkError(mlink)
+        return
+    def test_symbol(self, s):
+        if not libwstp.WSTestSymbol(mlink, ctypes.c_char_p(s)):
+            raise WSTPLinkError(mlink)
+        return
+
+    def get_function(self):
+        mlink, sp, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetFunction, -2)))
+        if not libwstp.WSGetFunction(mlink, ctypes.byref(sp), ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        with utils.pstrings(sp, countp, functools.partial(libwstp.WSReleaseSymbol, env)) as items:
+            decoded = [item.decode('ascii') for item in items]
+        return decoded
+    def put_function(self, s, argc):
+        mlink = self._mlink
+        if not libwstp.WSPutFunction(mlink, ctypes.c_char(s), argc):
+            raise WSTPLinkError(mlink)
+        return
+    def test_head(self, s):
+        mlink, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSTestHead, -1)))
+        if not libwstp.WSTestHead(mlink, ctypes.c_char_p(s), ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        return countp
+
+    def get_byte_array(self):
+        mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetByteArray, -4)))
+        if not libwstp.WSGetByteArray(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
+            raise WSTPLinkError(mlink)
+        depth = depthp.value
+        with utils.puint32s(dimsp, depth) as items:
+            dims = [item.value for item in items]
+        with utils.pstrings(headsp, depth) as items:
+            heads = [item.contents for item in items]
+        count = functools.reduce(operator.mul, dims, 1)
+        with utils.pbytes(datap, count) as items:
+            data = [item for item in items]
+        libwstp.WSReleaseByteArray(mlink, datap, dimsp, headsp, depth)
+        return data, dims, heads, depth
+    def get_integer_8_array(self):
+        mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSReleaseInteger8Array, -4)))
+        if not libwstp.WSGetInteger8Array(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
+            raise WSTPLinkError(mlink)
+        depth = depthp.value
+        with utils.puint32s(dimsp, depth) as items:
+            dims = [item.value for item in items]
+        with utils.pstrings(headsp, depth) as items:
+            heads = [item.contents for item in items]
+        count = functools.reduce(operator.mul, dims, 1)
+        with utils.pbytes(datap, count) as items:
+            data = [item for item in items]
+        libwstp.WSReleaseInteger8Array(mlink, datap, dimsp, headsp, depth)
+        return data, dims, heads, depth
+    def get_integer_16_array(self):
+        mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSReleaseInteger16Array, -4)))
+        if not libwstp.WSGetInteger16Array(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
+            raise WSTPLinkError(mlink)
+        depth = depthp.value
+        with utils.puint32s(dimsp, depth) as items:
+            dims = [item.value for item in items]
+        with utils.pstrings(headsp, depth) as items:
+            heads = [item.contents for item in items]
+        count = functools.reduce(operator.mul, dims, 1)
+        with utils.puint16s(datap, count) as items:
+            data = [item for item in items]
+        libwstp.WSReleaseInteger16Array(mlink, datap, dimsp, headsp, depth)
+        return data, dims, heads, depth
+    def get_integer_32_array(self):
+        mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSReleaseInteger32Array, -4)))
+        if not libwstp.WSGetInteger32Array(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
+            raise WSTPLinkError(mlink)
+        depth = depthp.value
+        with utils.puint32s(dimsp, depth) as items:
+            dims = [item.value for item in items]
+        with utils.pstrings(headsp, depth) as items:
+            heads = [item.contents for item in items]
+        count = functools.reduce(operator.mul, dims, 1)
+        with utils.puint32s(datap, count) as items:
+            data = [item for item in items]
+        libwstp.WSReleaseInteger32Array(mlink, datap, dimsp, headsp, depth)
+        return data, dims, heads, depth
+    def get_integer_64_array(self):
+        mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSReleaseInteger64Array, -4)))
+        if not libwstp.WSGetInteger64Array(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
+            raise WSTPLinkError(mlink)
+        depth = depthp.value
+        with utils.puint64s(dimsp, depth) as items:
+            dims = [item.value for item in items]
+        with utils.pstrings(headsp, depth) as items:
+            heads = [item.contents for item in items]
+        count = functools.reduce(operator.mul, dims, 1)
+        with utils.puint64s(datap, count) as items:
+            data = [item for item in items]
+        libwstp.WSReleaseInteger64Array(mlink, datap, dimsp, headsp, depth)
+        return data, dims, heads, depth
 
 if __name__ == '__main__':
     import sys, ctypes, wstp, libwstp, importlib
@@ -1001,6 +1651,8 @@ if __name__ == '__main__':
 
     #environment = wstp.initialize()
     env = wstp.InternalEnvironment.create(sys.getdefaultencoding())
+    link = env.Connect('FUCK')
+    link.activate()
     methods = ['version', 'compiler_id', 'ucs2_compiler_id', 'utf8_compiler_id', 'utf16_compiler_id', 'utf32_compiler_id']
 
     for F, name in zip(map(operator.methodcaller, methods), methods):
