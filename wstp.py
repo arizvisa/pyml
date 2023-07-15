@@ -1,10 +1,6 @@
 import builtins, os, operator, math, functools, itertools, sys, threading
 import gc, weakref, codecs, ctypes, logging, libwstp
 
-#def WSError(integer):
-#    description = _WSErrors.get(integer)
-#    return "error[{:d}, {:s}]".format(integer, description) if description else "error[{:d}]".format(integer)
-
 ### exception types
 class WSTPException(Exception):
     pass
@@ -372,7 +368,7 @@ class InternalEnvironment(object):
             cls._state[address] = environment
             cls._finalizers[address] = weakref.finalize(environment, cls.destroy, utils.cast(environment, libwstp.WSEnvironment))
         logging.warning("created environment at {:#x}.".format(ctypes.addressof(environment.contents)))
-        return Environment(environment)
+        return WSEnvironment(environment)
 
     @classmethod
     def destroy(cls, environment):
@@ -391,6 +387,10 @@ class InternalEnvironment(object):
 
     @classmethod
     def __finish_links(cls, environment, links):
+        logging.warning("destroying environment containing {:d} link{:s} ({:s}).".format(len(links), '' if len(links) == 1 else 's', ', '.join(map("{:#x}".format, links))))
+
+        # these should actually be gone by now, but we need to
+        # verify that this dict is empty in a thread-safe way.
         ok, destroyed = True, {}
         for identifier, link in links.items():
             result = destroyed[identifier] = cls.destroy_link(environment, identifier)
@@ -426,6 +426,10 @@ class InternalEnvironment(object):
 
     @classmethod
     def __finish_servers(cls, environment, servers):
+        logging.warning("destroying environment containing {:d} server{:s} ({:s}).".format(len(servers), '' if len(servers) == 1 else 's', ', '.join(map("{:#x}".format, servers))))
+
+        # these servers should actually be gone by now, but we need
+        # to verify that this dict is empty in a thread-safe way.
         ok, destroyed = True, {}
         for identifier, server in servers.items():
             result = destroyed[identifier] = cls.destroy_server(environment, server)
@@ -455,6 +459,10 @@ class InternalEnvironment(object):
 
     @classmethod
     def __finish_browsers(cls, environment, browsers):
+        logging.warning("destroying environment containing {:d} browser{:s} ({:s}).".format(len(browsers), '' if len(browsers) == 1 else 's', ', '.join(map("{:#x}".format, browsers))))
+
+        # none of the browsers should actually exist by now, but we need
+        # to verify that our tracking dict is empty in a thread-safe way.
         ok, destroyed = True, {}
         for address, serviceRef in browsers.items():
             result = destroyed[address] = cls.destroy_browser(environment, serviceRef)
@@ -484,6 +492,10 @@ class InternalEnvironment(object):
 
     @classmethod
     def __finish_resolvers(cls, environment, resolvers):
+        logging.warning("destroying environment containing {:d} resolver{:s} ({:s}).".format(len(resolvers), '' if len(resolvers) == 1 else 's', ', '.join(map("{:#x}".format, resolvers))))
+
+        # all of the resolvers should be destroyed by now. however, we need
+        # to verify that our tracking dict is empty in a threadsafe way.
         ok, destroyed = True, {}
         for address, serviceRef in resolvers.items():
             result = destroyed[address] = cls.destroy_resolver(environment, serviceRef)
@@ -513,6 +525,10 @@ class InternalEnvironment(object):
 
     @classmethod
     def __finish_services(cls, environment, services):
+        logging.warning("destroying environment containing {:d} service{:s} ({:s}).".format(len(services), '' if len(services) == 1 else 's', ', '.join(map("{:#x}".format, services))))
+
+        # none of the services should exist by now, but we need to
+        # verify that this dict is empty in a thread-safe way.
         ok, destroyed = True, {}
         for address, serviceRef in services.items():
             result = destroyed[address] = cls.destroy_service(environment, serviceRef)
@@ -532,7 +548,7 @@ class InternalEnvironment(object):
         logging.warning("stopped service {!r}.".format(serviceRef))
         return True
 
-class Environment(object):
+class WSEnvironment(object):
     def __init__(self, environment):
         self._environment, self._finalizers, self._contextrefs = environment, {}, {}
 
@@ -708,7 +724,7 @@ class Environment(object):
 
     def get_links(self):
         '''MLGetLinksFromEnvironment/MLReleaseLinksFromEnvironment'''
-        # FIXME: probably not useful
+        # FIXME: probably not useful since we're tracking these
         env, links, length = (item() for item in itertools.chain([lambda:self._environment], utils.arguments(libwstp.WSGetLinksFromEnvironment, -2)))
         err = libwstp.WSGetLinksFromEnvironment(env, ctypes.byref(links), ctypes.byref(length))
         if err != libwstp.WSEOK:
@@ -743,9 +759,8 @@ class Environment(object):
         assert((sanity is None) or not(sanity.alive))
         self._finalizers[identifier] = weakref.finalize(link, InternalEnvironment.destroy_link, env, identifier)
         self._links[identifier] = link
-        index = len(self._links)
 
-        description = libwstp.WSLinkName(link)
+        index, description = len(self._links), libwstp.WSLinkName(link)
         logging.warning("created link #{:d} ({:#x}) with name \"{:s}\" and returning it as {!s}.".format(index, identifier, description.decode('ascii'), link))
         return WSLink(link)
 
@@ -762,6 +777,25 @@ class Environment(object):
 
     def available_links(self):
         return {identifier for identifier in self._links}
+
+    def duplicate_link(self, wslink, name):
+        identifier = wslink if isinstance(wslink, int) else libwstp.WSToLinkID(wslink)
+        assert(identifier in self._links)
+        parent, error = (item() for item in itertools.chain([lambda:self.links[identifier]], utils.arguments(libwstp.WSNewLinkServer, -1)))
+        newlink = libwstp.WSDuplicateLink(parent, name, err)
+        if not(newlink) or error.value != libwstp.WSEOK:
+            raise WSTPEnvironmentException(error.value, 'unable to duplicate link id {:#x}', identifier)
+
+        env, link, identifier = self._environment, newlink, libwstp.WSToLinkID(newlink)
+        sanity = self._finalizers.get(identifier, None)
+        assert((sanity is None) or not(sanity.alive))
+        self._finalizers[identifier] = weakref.finalize(link, InternalEnvironment.destroy_link, env, identifier)
+        self._links[identifier] = link
+
+        index, origin, description = len(self._links), libwstp.WSLinkName(parent), libwstp.WSLinkName(newlink)
+        logging.warning("duplicated link #{:d} ({:#x}) from \"{:s}\" with name \"{:s}\" and duplicated it as {!s}.".format(index, identifier, origin.decode('ascii'), description.decode('ascii'), link))
+
+        return WSLink(newlink)
 
     ### service discovery and advertisement
 
@@ -1687,7 +1721,7 @@ if __name__ == '__main__':
     #print(hex(id(gc.get_referrers(x()))))
     #print(hex(id(gc.get_referrers(x()))))
 
-    #E = self = wstp.Environment()
+    #E = self = wstp.WSEnvironment()
     #self._environment = env
     #link = wstp.InternalEnvironment.create('intra')
     #print(link)
