@@ -350,7 +350,45 @@ class utils(object):
             return length, res
         get_ucs2, put_ucs2 = get_utf16, put_utf16
 
-    class array(object):
+    class collection(object):
+        @classmethod
+        def arguments(cls, func, skip, *args):
+            assert(isinstance(func, ctypes._CFuncPtr))
+            argtypes = func.argtypes
+            if isinstance(skip, slice):
+                listable = [argtypes[index] for index in range(*skip.indices(len(argtypes)))]
+                assert(all(issubclass(arg, ctypes._Pointer) for arg in listable))
+                return tuple(arg._type_ for arg in listable)
+            return cls.arguments(func, slice(skip, None) if skip >= 0 else slice(None, skip), *args)
+
+        @classmethod
+        def make(cls, item, target):
+            if item is None:
+                return ctypes.cast(ctypes.c_void_p(0), target)
+            elif issubclass(target, ctypes._Pointer):
+                return ctypes.cast(ctypes.pointer(item), ctypes.POINTER(target)).contents
+            global fuck
+            fuck = item, target
+            return target(item)
+
+        @classmethod
+        def put(cls, func, skip, *args):
+            assert(isinstance(func, ctypes._CFuncPtr))
+            argtypes = func.argtypes
+            if isinstance(skip, slice):
+                result, listable = cls(*args), [argtypes[index] for index in range(*skip.indices(len(argtypes)))]
+                return [cls.make(item, target) for item, target in zip(result, listable)]
+            return cls.put(func, slice(skip, None) if skip >= 0 else slice(None, skip), *args)
+
+        @classmethod
+        def get(cls, *callable):
+            raise NotImplementedError
+
+        def __new__(cls, type, data):
+            res = (type * len(data))(*data)
+            return ctypes.pointer(res), len(data)
+
+    class array(collection):
         @classmethod
         def __flatten__(cls, type, data):
             if not isinstance(data, type):
@@ -394,32 +432,6 @@ class utils(object):
             assert(not head or len(head) == len(dims))
             dims, heads = cls.dims(dimensions), cls.heads(head) if head else None
             return cls.data(type, dimensions, data), dims, heads, len(dimensions)
-
-        @classmethod
-        def make(cls, item, target):
-            if item is None:
-                return ctypes.cast(ctypes.c_void_p(0), target)
-            elif issubclass(target, ctypes._Pointer):
-                return ctypes.cast(ctypes.pointer(item), ctypes.POINTER(target)).contents
-            return target(item)
-
-        @classmethod
-        def put(cls, func, skip, *args):
-            assert(isinstance(func, ctypes._CFuncPtr))
-            argtypes = func.argtypes
-            if isinstance(skip, slice):
-                result, listable = cls(*args), [argtypes[index] for index in range(*skip.indices(len(argtypes)))]
-                return [cls.make(item, target) for item, target in zip(result, listable)]
-            return cls.put(func, slice(skip, None) if skip >= 0 else slice(None, skip), *args)
-
-        @classmethod
-        def arguments(cls, func, skip, *args):
-            assert(isinstance(func, ctypes._CFuncPtr))
-            argtypes = func.argtypes
-            if isinstance(skip, slice):
-                listable = [argtypes[index] for index in range(*skip.indices(len(argtypes)))]
-                return tuple(arg._type_ for arg in listable)
-            return cls.arguments(func, slice(skip, None) if skip >= 0 else slice(None, skip), *args)
 
         @classmethod
         def get(cls, data, dims, headsp, depth, *callable):
@@ -1858,6 +1870,99 @@ class WSLink(object):
         mlink, target = self._mlink, ctypes.c_longdouble
         parameters = utils.array.put(libwstp.WSPutReal128Array, 1, target, data, dims, heads or [])
         if not libwstp.WSPutReal128Array(mlink, *parameters):
+            raise WSTPLinkError(mlink)
+        return
+
+    def get_integer_8_list(self):
+        mlink, datap, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.collection.arguments(libwstp.WSGetInteger8List, 1)))
+        if not libwstp.WSGetInteger8List(mlink, ctypes.byref(datap), ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        with utils.pbytes(datap, countp, functools.partial(libwstp.WSReleaseInteger8List, mlink), countp.value) as items:
+            data = [item for item in items]
+        return data
+    def put_integer_8_list(self, data):
+        mlink, target = self._mlink, ctypes.c_ubyte
+        parameters = utils.collection.put(libwstp.WSPutInteger8List, 1, target, data)
+        if not libwstp.WSPutInteger8List(mlink, *parameters):
+            raise WSTPLinkError(mlink)
+        return
+    def get_integer_16_list(self):
+        mlink, datap, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.collection.arguments(libwstp.WSGetInteger16List, 1)))
+        if not libwstp.WSGetInteger16List(mlink, ctypes.byref(datap), ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        with utils.psint16s(datap, countp, functools.partial(libwstp.WSReleaseInteger16List, mlink), countp.value) as items:
+            data = [item for item in items]
+        return data
+    def put_integer_16_list(self, data):
+        mlink, target = self._mlink, ctypes.c_short
+        parameters = utils.collection.put(libwstp.WSPutInteger16List, 1, target, data)
+        if not libwstp.WSPutInteger16List(mlink, *parameters):
+            raise WSTPLinkError(mlink)
+        return
+    def get_integer_32_list(self):
+        mlink, datap, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.collection.arguments(libwstp.WSGetInteger32List, 1)))
+        if not libwstp.WSGetInteger32List(mlink, ctypes.byref(datap), ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        with utils.psint32s(datap, countp, functools.partial(libwstp.WSReleaseInteger32List, mlink), countp.value) as items:
+            data = [item for item in items]
+        return data
+    def put_integer_32_list(self, data):
+        mlink, target = self._mlink, ctypes.c_int
+        parameters = utils.collection.put(libwstp.WSPutInteger32List, 1, target, data)
+        if not libwstp.WSPutInteger32List(mlink, *parameters):
+            raise WSTPLinkError(mlink)
+        return
+    def get_integer_64_list(self):
+        mlink, datap, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.collection.arguments(libwstp.WSGetInteger64List, 1)))
+        if not libwstp.WSGetInteger64List(mlink, ctypes.byref(datap), ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        with utils.psint64s(datap, countp, functools.partial(libwstp.WSReleaseInteger64List, mlink), countp.value) as items:
+            data = [item for item in items]
+        return data
+    def put_integer_64_list(self, data):
+        mlink, target = self._mlink, libwstp.wsint64
+        parameters = utils.collection.put(libwstp.WSPutInteger64List, 1, target, data)
+        if not libwstp.WSPutInteger64List(mlink, *parameters):
+            raise WSTPLinkError(mlink)
+        return
+
+    def get_real_32_list(self):
+        mlink, datap, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.collection.arguments(libwstp.WSGetReal32List, 1)))
+        if not libwstp.WSGetReal32List(mlink, ctypes.byref(datap), ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        with utils.psingles(datap, countp, functools.partial(libwstp.WSReleaseReal32List, mlink), countp.value) as items:
+            data = [item for item in items]
+        return data
+    def put_real_32_list(self, data):
+        mlink, target = self._mlink, ctypes.c_float
+        parameters = utils.collection.put(libwstp.WSPutReal32List, 1, target, data)
+        if not libwstp.WSPutReal32List(mlink, *parameters):
+            raise WSTPLinkError(mlink)
+        return
+    def get_real_64_list(self):
+        mlink, datap, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.collection.arguments(libwstp.WSGetReal64List, 1)))
+        if not libwstp.WSGetReal64List(mlink, ctypes.byref(datap), ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        with utils.pdoubles(datap, countp, functools.partial(libwstp.WSReleaseReal64List, mlink), countp.value) as items:
+            data = [item for item in items]
+        return data
+    def put_real_64_list(self, data):
+        mlink, target = self._mlink, ctypes.c_double
+        parameters = utils.collection.put(libwstp.WSPutReal64List, 1, target, data)
+        if not libwstp.WSPutReal64List(mlink, *parameters):
+            raise WSTPLinkError(mlink)
+        return
+    def get_real_128_list(self):
+        mlink, datap, countp = (item() for item in itertools.chain([lambda:self._mlink], utils.collection.arguments(libwstp.WSGetReal128List, 1)))
+        if not libwstp.WSGetReal128List(mlink, ctypes.byref(datap), ctypes.byref(countp)):
+            raise WSTPLinkError(mlink)
+        with utils.plongdoubles(datap, countp, functools.partial(libwstp.WSReleaseReal128List, mlink), countp.value) as items:
+            data = [item for item in items]
+        return data
+    def put_real_128_list(self, data):
+        mlink, target = self._mlink, ctypes.c_longdouble
+        parameters = utils.collection.put(libwstp.WSPutReal128List, 1, target, data)
+        if not libwstp.WSPutReal128List(mlink, *parameters):
             raise WSTPLinkError(mlink)
         return
 
