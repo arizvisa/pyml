@@ -306,13 +306,16 @@ class utils(object):
         @classmethod
         def put_utf16(cls, string):
             bytes, length = cls._utf16.encode(string)
-            return len(bytes), cls._cast((ctypes.c_ubyte * len(bytes))(*bytearray(bytes)), ctypes.c_ushort * length)
+            extra = len(bytes) - 2 * len(string)    # BOM
+            return len(bytes), cls._cast((ctypes.c_ubyte * len(bytes))(*bytearray(bytes)), ctypes.c_ushort * (length + extra // 2))
+        put_ucs2 = put_utf16
         @classmethod
         def put_utf32(cls, string):
             bytes, length = cls._utf32.encode(string)
-            return len(bytes), cls._cast((ctypes.c_ubyte * len(bytes))(*bytearray(bytes)), ctypes.c_uint * length)
+            extra = len(bytes) - 4 * len(string)    # BOM
+            return len(bytes), cls._cast((ctypes.c_ubyte * len(bytes))(*bytearray(bytes)), ctypes.c_uint * (length + extra // 4))
         @classmethod
-        def put_string(cls, string):
+        def put_bytes(cls, string):
             return len(string), libwstp.String(string)
         @classmethod
         def put_number(cls, number):
@@ -320,11 +323,11 @@ class utils(object):
             #        ensure python doesn't scientific-notation or infinity it.
             string = "{:f}".format(number) if isinstance(number, float) else "{:d}".format(number) if isinstance(number, int) else "{!s}".format(number)
             encoded, length = cls._ascii.encode(string)
-            return cls.put_string(encoded)
+            return cls.put_bytes(encoded)
         @classmethod
-        def put_bytes(cls, string):
+        def put_string(cls, string):
             encoded, length = (string, len(string)) if isinstance(string, (bytes, bytearray)) else cls._bytes.encode(string)
-            return cls.put_string(encoded)
+            return cls.put_bytes(encoded)
         @classmethod
         def get_utf8(cls, array):
             res, length = cls._utf8.decode(bytearray(array))
@@ -334,6 +337,7 @@ class utils(object):
             bytes = cls._cast(array, ctypes.c_ubyte * ctypes.sizeof(array))
             res, length = cls._utf16.decode(bytearray(array))
             return length, res
+        get_ucs2 = get_utf16
         @classmethod
         def get_utf32(cls, array):
             bytes = cls._cast(array, ctypes.c_ubyte * ctypes.sizeof(array))
@@ -345,10 +349,9 @@ class utils(object):
             # XXX: is it right to straight-up convert this to a float/int?
             return length, res
         @classmethod
-        def get_bytes(cls, array):
+        def get_string(cls, array):
             res, length = cls._bytes.decode(bytearray(array))
             return length, res
-        get_ucs2, put_ucs2 = get_utf16, put_utf16
 
     class collection(object):
         @classmethod
@@ -1276,15 +1279,48 @@ class WSLink(object):
         mlink = self._mlink
         return libwstp.WSLinkName(mlink)
 
-    #MLDECL( const unsigned short *, MLUCS2LinkName,  (MLINK mlp, int *length));
-    #MLDECL( const unsigned char *,  MLUTF8LinkName,  (MLINK mlp, int *length));
-    #MLDECL( const unsigned short *, MLUTF16LinkName, (MLINK mlp, int *length));
-    #MLDECL( const unsigned int *,   MLUTF32LinkName, (MLINK mlp, int *length));
-
-    #MLDECL(void, MLReleaseUCS2LinkName,  (MLINK mlp, const unsigned short *name, int length));
-    #MLDECL(void, MLReleaseUTF8LinkName,  (MLINK mlp, const unsigned char *name, int length));
-    #MLDECL(void, MLReleaseUTF16LinkName, (MLINK mlp, const unsigned short *name, int length));
-    #MLDECL(void, MLReleaseUTF32LinkName, (MLINK mlp, const unsigned int *name, int length));
+    def ucs2_link_name(self):
+        mlink, target, length = (item() for item in itertools.chain([lambda:self._mlink, lambda:ctypes.c_ushort], utils.arguments(libwstp.WSUCS2LinkName, -1)))
+        res = libwstp.WSUCS2LinkName(mlink, ctypes.byref(length))
+        if not res:
+            raise WSTPLinkError(mlink)
+        with utils.puint16s(res, length, functools.partial(libwstp.WSReleaseUCS2LinkName, mlink), length.value) as chars:
+            pitems, size = ctypes.pointer((target * len(chars))(*chars)), ctypes.sizeof(target)
+            pbytes = ctypes.cast(pitems, ctypes.POINTER(ctypes.c_ubyte * size * len(chars)))
+            count, string = utils.string.get_ucs2(pbytes.contents)
+            assert(count == len(chars) * size)
+        return string
+    def utf8_link_name(self):
+        mlink, target, length = (item() for item in itertools.chain([lambda:self._mlink, lambda:ctypes.c_ubyte], utils.arguments(libwstp.WSUTF8LinkName, -1)))
+        res = libwstp.WSUTF8LinkName(mlink, ctypes.byref(length))
+        if not res:
+            raise WSTPLinkError(mlink)
+        with utils.pbytes(res, length, functools.partial(libwstp.WSReleaseUTF8LinkName, mlink), length.value) as bytes:
+            count, string = utils.string.get_utf8(bytes)
+            assert(len(bytes) == count)
+        return string
+    def utf16_link_name(self):
+        mlink, target, length = (item() for item in itertools.chain([lambda:self._mlink, lambda:ctypes.c_ushort], utils.arguments(libwstp.WSUTF16LinkName, -1)))
+        res = libwstp.WSUTF16LinkName(mlink, ctypes.byref(length))
+        if not res:
+            raise WSTPLinkError(mlink)
+        with utils.puint16s(res, length, functools.partial(libwstp.WSReleaseUTF16LinkName, mlink), length.value) as chars:
+            pitems, size = ctypes.pointer((target * len(chars))(*chars)), ctypes.sizeof(target)
+            pbytes = ctypes.cast(pitems, ctypes.POINTER(ctypes.c_ubyte * size * len(chars)))
+            count, string = utils.string.get_utf16(pbytes.contents)
+            assert(count == len(chars) * size)
+        return string
+    def utf32_link_name(self):
+        mlink, target, length = (item() for item in itertools.chain([lambda:self._mlink, lambda:ctypes.c_uint], utils.arguments(libwstp.WSUTF32LinkName, -1)))
+        res = libwstp.WSUTF32LinkName(mlink, ctypes.byref(length))
+        if not res:
+            raise WSTPLinkError(mlink)
+        with utils.puint32s(res, length, functools.partial(libwstp.WSReleaseUTF32LinkName, mlink), length.value) as chars:
+            pitems, size = ctypes.pointer((target * len(chars))(*chars)), ctypes.sizeof(target)
+            pbytes = ctypes.cast(pitems, ctypes.POINTER(ctypes.c_ubyte * size * len(chars)))
+            count, string = utils.string.get_utf32(pbytes.contents)
+            assert(count == len(chars) * size)
+        return string
 
     @property
     def number(self):
@@ -1585,37 +1621,41 @@ class WSLink(object):
         return
 
     def get_ucs2_string(self):
-        mlink, sp, lenp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetUCS2String, -1)))
+        mlink, sp, lenp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetUCS2String, -2)))
         if not libwstp.WSGetUCS2String(mlink, ctypes.byref(sp), ctypes.byref(lenp)):
             raise WSTPLinkError(mlink)
-        with utils.pstring(sp, functools.partial(libwstp.WSReleaseUCS2String, mlink), lenp) as string:
-            result = string
+        with utils.pbytes(sp, lenp, functools.partial(libwstp.WSReleaseUCS2String, mlink), lenp) as string:
+            count, result = utils.string.get_ucs2((ctypes.c_ubyte * len(string))(*string))
+            assert(count == lenp.value)
         return result
     def get_utf8_string(self):
         mlink, sp, bytes, chars = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetUTF8String, -3)))
         if not libwstp.WSGetUTF8String(mlink, ctypes.byref(sp), ctypes.byref(bytes), ctypes.byref(chars)):
             raise WSTPLinkError(mlink)
         with utils.pbytes(sp, bytes, functools.partial(libwstp.WSReleaseUTF8String, mlink), bytes) as string:
-            result = string
+            count, result = utils.string.get_utf8(string)
+            assert(count == bytes.value)
         return result
     def get_utf16_string(self):
         mlink, sp, bytes, chars = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetUTF16String, -3)))
         if not libwstp.WSGetUTF16String(mlink, ctypes.byref(sp), ctypes.byref(bytes), ctypes.byref(chars)):
             raise WSTPLinkError(mlink)
-        with utils.pbytes(sp, chars, functools.partial(libwstp.WSReleaseUTF16String, mlink), bytes) as string:
-            result = string
+        with utils.pbytes(sp, bytes, functools.partial(libwstp.WSReleaseUTF16String, mlink), bytes) as string:
+            count, result = utils.string.get_utf16((ctypes.c_ubyte * len(string))(*string))
+            assert(count == bytes.value)
         return result
     def get_utf32_string(self):
         mlink, sp, bytes, chars = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetUTF32String, -3)))
         if not libwstp.WSGetUTF32String(mlink, ctypes.byref(sp), ctypes.byref(bytes), ctypes.byref(chars)):
             raise WSTPLinkError(mlink)
         with utils.pbytes(sp, chars, functools.partial(libwstp.WSReleaseUTF32String, mlink), bytes) as string:
-            result = string
+            count, result = utils.string.get_utf32((ctypes.c_ubyte * len(string))(*string))
+            assert((count == bytes.value) and (len(result) == chars.value))
         return result
     def put_ucs2_string(self, s):
-        #FIXME: c_ushort
-        mlink = self._mlink
-        if not libwstp.WSPutUCS2String(mlink, ctypes.c_char_p(s), len(s)):
+        length, res = utils.string.put_ucs2(s)
+        mlink, s = self._mlink, ctypes.cast(ctypes.pointer(res), libwstp.WSPutUCS2String.argtypes[1]).contents
+        if not libwstp.WSPutUCS2String(mlink, ctypes.byref(s), length):
             raise WSTPLinkError(mlink)
         return
     def put_utf8_string(self, s):
@@ -1703,17 +1743,20 @@ class WSLink(object):
         return
 
     def get_symbol(self):
-        mlink, sp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetByteSymbol, -1)))
+        mlink, sp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WSGetSymbol, -1)))
         if not libwstp.WSGetSymbol(mlink, ctypes.byref(sp)):
             raise WSTPLinkError(mlink)
-        res = sp.contents
-        libwstp.WSReleaseSymbol(mlink, sp)
+        with utils.pstring(sp, functools.partial(libwstp.WSReleaseSymbol, mlink)) as string:
+            print(string)
+            length, res = utils.string.get_string(string)
         return res
     def put_symbol(self, s):
-        if not libwstp.WSPutSymbol(mlink, ctypes.c_char_p(s)):
+        mlink, (length, res) = self._mlink, utils.string.put_string(s)
+        if not libwstp.WSPutSymbol(mlink, res):
             raise WSTPLinkError(mlink)
         return
     def test_symbol(self, s):
+        mlink, sp = (item() for item in itertools.chain([lambda:self._mlink], utils.arguments(libwstp.WTestSymbol, -1)))
         if not libwstp.WSTestSymbol(mlink, ctypes.c_char_p(s)):
             raise WSTPLinkError(mlink)
         return
