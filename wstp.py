@@ -173,6 +173,10 @@ class utils(object):
         return cls.pointer_things(object, ctypes.c_double, length, callable)
 
     @classmethod
+    def plongdoubles(cls, object, length, *callable):
+        return cls.pointer_things(object, ctypes.c_longdouble, length, callable)
+
+    @classmethod
     def psint16s(cls, object, length, *callable):
         return cls.pointer_things(object, ctypes.c_short, length, callable)
 
@@ -414,18 +418,17 @@ class utils(object):
             argtypes = func.argtypes
             if isinstance(skip, slice):
                 listable = [argtypes[index] for index in range(*skip.indices(len(argtypes)))]
-                return tuple(arg for arg in listable)
-            return cls.get(func, slice(skip, None) if skip >= 0 else slice(None, skip), *args)
+                return tuple(arg._type_ for arg in listable)
+            return cls.arguments(func, slice(skip, None) if skip >= 0 else slice(None, skip), *args)
 
         @classmethod
-        def get(cls, data, dimsp, headsp, depth, *callable):
+        def get(cls, data, dims, headsp, depth, *callable):
             depth = getattr(depth, 'value', depth)
             iterable = iter(callable)
+
             [release, iterable] = next(iterable, None), iterable
             release_args = [arg for arg in iterable]
 
-            with utils.puint32s(dimsp, depth) as items:
-                dims = [item for item in items]
             with utils.pstrings(headsp, depth) as items:
                 heads = [item for item in items]
 
@@ -433,7 +436,7 @@ class utils(object):
             reshaped = cls.__reshape__(data, dims)
 
             if release:
-                release(dimsp, headsp, depth)
+                release(headsp, depth, *release_args)
             return reshaped, dims, heads
 
 # FIXME: there's absolutely no reason for this to be a singleton, as we really
@@ -1736,61 +1739,49 @@ class WSLink(object):
         libwstp.WSReleaseByteArray(mlink, datap, dimsp, headsp, depth)
         return data, dims, heads, depth
     def get_integer_8_array(self):
-        mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.array.arguments(libwstp.WSReleaseInteger8Array, 1)))
+        mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.array.arguments(libwstp.WSGetInteger8Array, 1)))
         if not libwstp.WSGetInteger8Array(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
             raise WSTPLinkError(mlink)
         depth = depthp.value
         with utils.puint32s(dimsp, depth) as items:
             dims = [item for item in items]
-        with utils.pstrings(headsp, depth) as items:
-            heads = [item for item in items]
         count = functools.reduce(operator.mul, dims, 1)
         with utils.pbytes(datap, count) as items:
             data = [item for item in items]
-        libwstp.WSReleaseInteger8Array(mlink, datap, dimsp, headsp, depth)
-        return data, dims, heads, depth
+        return utils.array.get(data, dims, headsp, depth, functools.partial(libwstp.WSReleaseInteger8Array, mlink, datap, dimsp))
     def get_integer_16_array(self):
         mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.array.arguments(libwstp.WSGetInteger16Array, 1)))
         if not libwstp.WSGetInteger16Array(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
             raise WSTPLinkError(mlink)
         depth = depthp.value
         with utils.puint32s(dimsp, depth) as items:
-            dims = [item.value for item in items]
-        with utils.pstrings(headsp, depth) as items:
-            heads = [item.contents for item in items]
+            dims = [item for item in items]
         count = functools.reduce(operator.mul, dims, 1)
-        with utils.puint16s(datap, count) as items:
+        with utils.psint16s(datap, count) as items:
             data = [item for item in items]
-        libwstp.WSReleaseInteger16Array(mlink, datap, dimsp, headsp, depth)
-        return data, dims, heads, depth
+        return utils.array.get(data, dims, headsp, depth, functools.partial(libwstp.WSReleaseInteger16Array, mlink, datap, dimsp))
     def get_integer_32_array(self):
         mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.array.arguments(libwstp.WSGetInteger32Array, 1)))
         if not libwstp.WSGetInteger32Array(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
             raise WSTPLinkError(mlink)
         depth = depthp.value
         with utils.puint32s(dimsp, depth) as items:
-            dims = [item.value for item in items]
-        with utils.pstrings(headsp, depth) as items:
-            heads = [item.contents for item in items]
+            dims = [item for item in items]
         count = functools.reduce(operator.mul, dims, 1)
-        with utils.puint32s(datap, count) as items:
+        with utils.psint32s(datap, count) as items:
             data = [item for item in items]
-        libwstp.WSReleaseInteger32Array(mlink, datap, dimsp, headsp, depth)
-        return data, dims, heads, depth
+        return utils.array.get(data, dims, headsp, depth, functools.partial(libwstp.WSReleaseInteger32Array, mlink, datap, dimsp))
     def get_integer_64_array(self):
         mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.array.arguments(libwstp.WSGetInteger64Array, 1)))
         if not libwstp.WSGetInteger64Array(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
             raise WSTPLinkError(mlink)
         depth = depthp.value
-        with utils.puint64s(dimsp, depth) as items:
-            dims = [item.value for item in items]
-        with utils.pstrings(headsp, depth) as items:
-            heads = [item.contents for item in items]
+        with utils.puint32s(dimsp, depth) as items:
+            dims = [item for item in items]
         count = functools.reduce(operator.mul, dims, 1)
-        with utils.puint64s(datap, count) as items:
+        with utils.psint64s(datap, count) as items:
             data = [item for item in items]
-        libwstp.WSReleaseInteger64Array(mlink, datap, dimsp, headsp, depth)
-        return data, dims, heads, depth
+        return utils.array.get(data, dims, headsp, depth, functools.partial(libwstp.WSReleaseInteger64Array, mlink, datap, dimsp))
 
     def put_integer_8_array(self, data, dims, heads=None):
         mlink, target = self._mlink, ctypes.c_ubyte
@@ -1814,6 +1805,59 @@ class WSLink(object):
         mlink, target = self._mlink, libwstp.wsint64
         parameters = utils.array.put(libwstp.WSPutInteger64Array, 1, target, data, dims, heads or [])
         if not libwstp.WSPutInteger64Array(mlink, *parameters):
+            raise WSTPLinkError(mlink)
+        return
+
+    def get_real_32_array(self):
+        mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.array.arguments(libwstp.WSGetReal32Array, 1)))
+        if not libwstp.WSGetReal32Array(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
+            raise WSTPLinkError(mlink)
+        depth = depthp.value
+        with utils.puint32s(dimsp, depth) as items:
+            dims = [item for item in items]
+        count = functools.reduce(operator.mul, dims, 1)
+        with utils.psingles(datap, count) as items:
+            data = [item for item in items]
+        return utils.array.get(data, dims, headsp, depth, functools.partial(libwstp.WSReleaseReal32Array, mlink, datap, dimsp))
+    def get_real_64_array(self):
+        mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.array.arguments(libwstp.WSGetReal64Array, 1)))
+        if not libwstp.WSGetReal64Array(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
+            raise WSTPLinkError(mlink)
+        depth = depthp.value
+        with utils.puint32s(dimsp, depth) as items:
+            dims = [item for item in items]
+        count = functools.reduce(operator.mul, dims, 1)
+        with utils.pdoubles(datap, count) as items:
+            data = [item for item in items]
+        return utils.array.get(data, dims, headsp, depth, functools.partial(libwstp.WSReleaseReal64Array, mlink, datap, dimsp))
+    def get_real_128_array(self):
+        mlink, datap, dimsp, headsp, depthp = (item() for item in itertools.chain([lambda:self._mlink], utils.array.arguments(libwstp.WSGetReal128Array, 1)))
+        if not libwstp.WSGetReal128Array(mlink, ctypes.byref(datap), ctypes.byref(dimsp), ctypes.byref(headsp), ctypes.byref(depthp)):
+            raise WSTPLinkError(mlink)
+        depth = depthp.value
+        with utils.puint32s(dimsp, depth) as items:
+            dims = [item for item in items]
+        count = functools.reduce(operator.mul, dims, 1)
+        with utils.plongdoubles(datap, count) as items:
+            data = [item for item in items]
+        return utils.array.get(data, dims, headsp, depth, functools.partial(libwstp.WSReleaseReal128Array, mlink, datap, dimsp))
+
+    def put_real_32_array(self, data, dims, heads=None):
+        mlink, target = self._mlink, ctypes.c_float
+        parameters = utils.array.put(libwstp.WSPutReal32Array, 1, target, data, dims, heads or [])
+        if not libwstp.WSPutReal32Array(mlink, *parameters):
+            raise WSTPLinkError(mlink)
+        return
+    def put_real_64_array(self, data, dims, heads=None):
+        mlink, target = self._mlink, ctypes.c_double
+        parameters = utils.array.put(libwstp.WSPutReal64Array, 1, target, data, dims, heads or [])
+        if not libwstp.WSPutReal64Array(mlink, *parameters):
+            raise WSTPLinkError(mlink)
+        return
+    def put_real_128_array(self, data, dims, heads=None):
+        mlink, target = self._mlink, ctypes.c_longdouble
+        parameters = utils.array.put(libwstp.WSPutReal128Array, 1, target, data, dims, heads or [])
+        if not libwstp.WSPutReal128Array(mlink, *parameters):
             raise WSTPLinkError(mlink)
         return
 
